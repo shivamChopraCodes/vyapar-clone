@@ -1,0 +1,280 @@
+/* ============================================================
+   Invoice Print Styles — scoped under .invoice-print
+   ============================================================ */
+
+/* ---- Screen: hide the invoice ---- */
+.invoice-print-wrapper {
+  display: none;
+}
+
+/* ---- Invoice Base ---- */
+.invoice-print {
+  width: 190mm;
+  min-height: 277mm;
+  margin: 0 auto;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #000;
+  background: #fff;
+  box-sizing: border-box;
+}
+
+/* ---- Header ---- */
+.inv-label {
+  text-align: center;
+  font-size: 14px;
+  font-weight: bold;
+  margin: 0 0 2px;
+}
+
+.inv-company-box {
+  border: 1px solid #000;
+  padding: 6px 10px;
+  text-align: center;
+}
+
+.inv-company-box h1 {
+  font-size: 18px;
+  font-weight: bold;
+  margin: 2px 0 4px;
+  text-transform: uppercase;
+}
+
+.inv-company-box p {
+  margin: 1px 0;
+  font-size: 10.5px;
+}
+
+/* ---- Bill To / Invoice Details ---- */
+.inv-parties {
+  display: flex;
+  border: 1px solid #000;
+  border-top: none; /* shares top border with company box */
+}
+
+.inv-bill-to,
+.inv-invoice-details {
+  flex: 1;
+  padding: 5px 8px;
+}
+
+.inv-bill-to {
+  border-right: 1px solid #000;
+}
+
+.inv-bill-to .inv-section-label,
+.inv-invoice-details .inv-section-label {
+  font-weight: bold;
+  font-size: 11px;
+  margin-bottom: 2px;
+}
+
+.inv-invoice-details {
+  text-align: right;
+}
+
+.inv-invoice-details p,
+.inv-bill-to p {
+  margin: 1px 0;
+  font-size: 10.5px;
+}
+
+.inv-bill-to .inv-party-name {
+  font-weight: bold;
+  font-size: 11.5px;
+}
+
+/* ---- Item Table ---- */
+.inv-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.inv-table th,
+.inv-table td {
+  border: 1px solid #000;
+  padding: 3px 5px;
+  font-size: 10.5px;
+  vertical-align: top;
+  word-wrap: break-word;
+}
+
+.inv-table thead th {
+  font-weight: bold;
+  text-align: left;
+  background: #fff;
+  border-top: none; /* shares border with section above */
+}
+
+/* Column widths */
+.inv-table .col-sno    { width: 4%; }
+.inv-table .col-item   { width: 16%; }
+.inv-table .col-hsn    { width: 8%; }
+.inv-table .col-batch  { width: 10%; }
+.inv-table .col-expiry { width: 9%; }
+.inv-table .col-mrp    { width: 7%; }
+.inv-table .col-qty    { width: 6%; }
+.inv-table .col-unit   { width: 6%; }
+.inv-table .col-price  { width: 9%; }
+.inv-table .col-gst    { width: 12%; }
+.inv-table .col-amount { width: 13%; }
+
+.inv-table td.text-right,
+.inv-table th.text-right {
+  text-align: right;
+}
+
+/* Empty filler rows */
+.inv-table .empty-row td {
+  height: 22px;
+}
+
+/* Total row */
+.inv-table tfoot td {
+  font-weight: bold;
+  border-top: 1px solid #000;
+}
+
+/* ---- Summary (Amount in Words + Amounts) ---- */
+.inv-summary {
+  display: flex;
+  border: 1px solid #000;
+  border-top: none;
+}
+
+.inv-words {
+  flex: 1;
+  padding: 5px 8px;
+  border-right: 1px solid #000;
+}
+
+.inv-words .inv-section-label {
+  font-weight: bold;
+  margin-bottom: 2px;
+}
+
+.inv-words p {
+  margin: 2px 0;
+  font-style: italic;
+  font-size: 10.5px;
+}
+
+.inv-amounts {
+  flex: 1;
+  padding: 5px 8px;
+}
+
+.inv-amounts .inv-section-label {
+  font-weight: bold;
+  margin-bottom: 2px;
+}
+
+.inv-amounts table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.inv-amounts table td {
+  padding: 1px 0;
+  font-size: 10.5px;
+  border: none;
+}
+
+.inv-amounts table td:last-child {
+  text-align: right;
+}
+
+.inv-amounts table tr.inv-grand-total td {
+  font-weight: bold;
+  font-size: 12px;
+  padding-top: 3px;
+  border-top: 1px solid #000;
+}
+
+/* ---- Footer (Terms + Signature) ---- */
+.inv-footer {
+  display: flex;
+  border: 1px solid #000;
+  border-top: none;
+}
+
+.inv-terms {
+  flex: 1;
+  padding: 5px 8px;
+  border-right: 1px solid #000;
+  font-size: 10px;
+}
+
+.inv-terms .inv-section-label {
+  font-weight: bold;
+  margin-bottom: 3px;
+}
+
+.inv-terms p {
+  margin: 1px 0;
+  color: #333;
+}
+
+.inv-signatory {
+  flex: 1;
+  padding: 5px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: space-between;
+  min-height: 60px;
+}
+
+.inv-signatory .inv-for-company {
+  font-weight: bold;
+  font-size: 11px;
+}
+
+.inv-signatory .inv-auth-label {
+  font-weight: bold;
+  font-size: 11px;
+}
+
+/* ============================================================
+   @media print — show only the invoice, hide app chrome
+   ============================================================ */
+@media print {
+  @page {
+    size: A4;
+    margin: 10mm;
+  }
+
+  /* Hide everything */
+  body * {
+    visibility: hidden !important;
+  }
+
+  /* Show only the invoice wrapper and its descendants */
+  .invoice-print-wrapper,
+  .invoice-print-wrapper * {
+    visibility: visible !important;
+  }
+
+  .invoice-print-wrapper {
+    display: block !important;
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+
+  .invoice-print {
+    width: 100%;
+  }
+
+  /* Remove app shell styles that bleed through */
+  .app-shell {
+    display: block !important;
+  }
+
+  .sidebar {
+    display: none !important;
+  }
+}
