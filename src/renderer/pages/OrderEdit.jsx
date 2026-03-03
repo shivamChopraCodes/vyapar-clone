@@ -38,12 +38,14 @@ const toInputDate = (value) => {
   return '';
 };
 
-export default function OrderEdit() {
+export default function OrderEdit({ forcedOrderType = null }) {
   const navigate = useNavigate();
   const { orderId } = useParams();
   const isEditMode = Boolean(orderId);
+  const forcedType = forcedOrderType === 'purchase' ? 'purchase' : forcedOrderType === 'sale' ? 'sale' : null;
+  const listPath = forcedType === 'purchase' ? '/purchase' : '/sales';
   const [loading, setLoading] = useState(true);
-  const [orderType, setOrderType] = useState('sale');
+  const [orderType, setOrderType] = useState(forcedType || 'sale');
   const [partyId, setPartyId] = useState('');
   const [invoiceNo, setInvoiceNo] = useState('');
   const [placeOfSupply, setPlaceOfSupply] = useState('');
@@ -55,6 +57,7 @@ export default function OrderEdit() {
   const [units, setUnits] = useState([]);
   const [parties, setParties] = useState([]);
   const [taxCodes, setTaxCodes] = useState([]);
+  const [partyRatesForOrder, setPartyRatesForOrder] = useState([]);
   const [orderItems, setOrderItems] = useState([]);
   const [lineForm, setLineForm] = useState(emptyLine);
   const [company, setCompany] = useState(null);
@@ -81,6 +84,7 @@ export default function OrderEdit() {
     setTaxCodes(taxCodeData || []);
     setCompany(companyData?.[0] || null);
     if (!isEditMode) {
+      setOrderType(forcedType || 'sale');
       setPlaceOfSupply('');
       setLoading(false);
       return;
@@ -123,13 +127,49 @@ export default function OrderEdit() {
 
   useEffect(() => {
     load();
-  }, [orderId]);
+  }, [orderId, forcedType]);
+
+  useEffect(() => {
+    if (!isEditMode && forcedType) {
+      setOrderType(forcedType);
+    }
+  }, [forcedType, isEditMode]);
+
+  const effectiveOrderType = forcedType || orderType;
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadPartyRatesForOrder = async () => {
+      if (!partyId) {
+        setPartyRatesForOrder([]);
+        return;
+      }
+      const data = await window.vyapar.listPartyRatesForOrder(Number(partyId), effectiveOrderType);
+      if (!cancelled) setPartyRatesForOrder(data || []);
+    };
+    loadPartyRatesForOrder();
+    return () => {
+      cancelled = true;
+    };
+  }, [partyId, effectiveOrderType]);
 
   const itemMap = useMemo(() => {
     const map = new Map();
     items.forEach((item) => map.set(String(item.id), item));
     return map;
   }, [items]);
+
+  const partyRateByItemId = useMemo(() => {
+    const map = new Map();
+    partyRatesForOrder.forEach((row) => {
+      const itemId = Number(row.item_id);
+      const rate = Number(row.rate || 0);
+      if (!Number.isFinite(itemId) || itemId <= 0) return;
+      if (!Number.isFinite(rate) || rate <= 0) return;
+      map.set(String(itemId), rate);
+    });
+    return map;
+  }, [partyRatesForOrder]);
 
   const unitMap = useMemo(() => {
     const map = new Map();
@@ -165,6 +205,7 @@ export default function OrderEdit() {
       event && typeof event === 'object' && event.target ? event.target.value : String(event ?? '');
     if (field === 'item_id') {
       const item = itemMap.get(value);
+      const partyRate = partyRateByItemId.get(value);
       const nextUnitId = item?.base_unit_id ?? null;
       setLineForm((prev) => ({
         ...prev,
@@ -173,7 +214,12 @@ export default function OrderEdit() {
         unit_id: nextUnitId,
         unit: nextUnitId !== null ? unitMap.get(String(nextUnitId)) || item?.base_unit || '' : '',
         gst_rate: item ? item.gst_rate : '',
-        rate: item ? item.base_rate : ''
+        rate:
+          partyRate !== undefined && partyRate !== null
+            ? partyRate
+            : item
+            ? item.base_rate
+            : ''
       }));
       return;
     }
@@ -249,7 +295,7 @@ export default function OrderEdit() {
   const saveOrder = async () => {
     if (!orderItems.length) return;
     const payload = {
-      order_type: orderType,
+      order_type: effectiveOrderType,
       party_id: partyId ? Number(partyId) : null,
       order_date: orderDate,
       invoice_no: invoiceNo,
@@ -275,7 +321,7 @@ export default function OrderEdit() {
     } else {
       await window.vyapar.createOrder(payload);
     }
-    navigate('/orders');
+    navigate(listPath);
   };
 
   const totals = useMemo(() => {
@@ -381,8 +427,8 @@ export default function OrderEdit() {
             {isEditMode ? 'Update header details and line items.' : 'Add header details and line items.'}
           </p>
         </div>
-        <Button type="button" variant="outline" onClick={() => navigate('/orders')}>
-          Back to Orders
+        <Button type="button" variant="outline" onClick={() => navigate(listPath)}>
+          Back to {forcedType === 'purchase' ? 'Purchase' : 'Sales'}
         </Button>
       </div>
 
@@ -392,15 +438,25 @@ export default function OrderEdit() {
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-            <div>
-              <Label>Order Type</Label>
-              <SearchableSelect
-                value={orderType}
-                options={orderTypeOptions}
-                onChange={(nextValue) => setOrderType(String(nextValue))}
-                placeholder="Search order type"
-              />
-            </div>
+            {forcedType ? (
+              <div>
+                <Label>Order Type</Label>
+                <Input
+                  value={forcedType === 'purchase' ? 'Purchase' : 'Sale'}
+                  readOnly
+                />
+              </div>
+            ) : (
+              <div>
+                <Label>Order Type</Label>
+                <SearchableSelect
+                  value={orderType}
+                  options={orderTypeOptions}
+                  onChange={(nextValue) => setOrderType(String(nextValue))}
+                  placeholder="Search order type"
+                />
+              </div>
+            )}
             <div>
               <Label>Party</Label>
               <SearchableSelect

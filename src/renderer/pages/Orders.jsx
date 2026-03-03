@@ -124,8 +124,13 @@ const loadStoredFilters = () => {
   }
 };
 
-export default function Orders() {
+export default function Orders({ mode = 'sale' }) {
   const navigate = useNavigate();
+  const fixedOrderType = mode === 'purchase' ? 'purchase' : mode === 'sale' ? 'sale' : '';
+  const isPurchaseMode = fixedOrderType === 'purchase';
+  const pageTitle = isPurchaseMode ? 'Purchase Invoices' : 'Sale Invoices';
+  const summaryLabel = isPurchaseMode ? 'Total Purchase Amount' : 'Total Sales Amount';
+  const createPath = isPurchaseMode ? '/purchase/new' : '/sales/new';
   const [parties, setParties] = useState([]);
   const [orders, setOrders] = useState([]);
   const [selectedOrderId, setSelectedOrderId] = useState(null);
@@ -186,7 +191,8 @@ export default function Orders() {
 
     return orders
       .filter((order) => {
-        if (filters.order_type && order.order_type !== filters.order_type) return false;
+        const activeType = fixedOrderType || filters.order_type;
+        if (activeType && order.order_type !== activeType) return false;
         if (filters.party_id && String(order.party_id || '') !== String(filters.party_id)) return false;
 
         const orderDate = normalizeDateForCompare(order.order_date);
@@ -216,7 +222,7 @@ export default function Orders() {
         if (byInvoice !== 0) return byInvoice;
         return Number(b.id || 0) - Number(a.id || 0);
       });
-  }, [orders, filters, partiesMap]);
+  }, [orders, filters, partiesMap, fixedOrderType]);
 
   const summary = useMemo(() => {
     return filteredOrders.reduce(
@@ -264,11 +270,18 @@ export default function Orders() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="section-title text-3xl font-semibold">Sale Invoices</h2>
+          <h2 className="section-title text-3xl font-semibold">{pageTitle}</h2>
         </div>
-        <Button type="button" onClick={() => navigate('/orders/new')}>
-          + Add Sale
-        </Button>
+        <div className="flex items-center gap-2">
+          {isPurchaseMode && (
+            <Button type="button" variant="outline" onClick={() => navigate('/orders/import-ocr')}>
+              Import from Invoice
+            </Button>
+          )}
+          <Button type="button" onClick={() => navigate(createPath)}>
+            {isPurchaseMode ? '+ Add Purchase' : '+ Add Sale'}
+          </Button>
+        </div>
       </div>
 
       <Card className='relative z-10' >
@@ -319,15 +332,17 @@ export default function Orders() {
                 placeholder="All firms"
               />
             </div>
-            <div className="min-w-36">
-              <Label>Type</Label>
-              <SearchableSelect
-                value={filters.order_type}
-                options={typeOptions}
-                onChange={updateFilter('order_type')}
-                placeholder="All types"
-              />
-            </div>
+            {!fixedOrderType && (
+              <div className="min-w-36">
+                <Label>Type</Label>
+                <SearchableSelect
+                  value={filters.order_type}
+                  options={typeOptions}
+                  onChange={updateFilter('order_type')}
+                  placeholder="All types"
+                />
+              </div>
+            )}
             <div className="min-w-56 flex-1">
               <Label>Search</Label>
               <Input
@@ -348,7 +363,7 @@ export default function Orders() {
       <Card>
         <CardContent>
           <div className="max-w-xs rounded-lg border border-border bg-muted/20 p-4">
-            <p className="text-xs font-semibold uppercase tracking-wide text-muted">Total Sales Amount</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted">{summaryLabel}</p>
             <p className="mt-1 text-3xl font-semibold">{formatCurrency(summary.total)}</p>
             <p className="mt-2 text-xs text-muted">
               Received: {formatCurrency(summary.received)} | Balance: {formatCurrency(summary.balance)}

@@ -6,8 +6,9 @@ const links = [
   { to: '/company', label: 'Company Setup' },
   { to: '/parties', label: 'Parties' },
   { to: '/items', label: 'Items & Batches' },
-  { to: '/orders', label: 'Orders' },
-  { to: '/orders/new', label: 'New Order' }
+  { to: '/reports', label: 'Reports' },
+  { to: '/sales', label: 'Sales Orders' },
+  { to: '/purchase', label: 'Purchase Orders' }
 ];
 
 export default function Sidebar() {

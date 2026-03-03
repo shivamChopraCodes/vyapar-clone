@@ -4,8 +4,30 @@ const fs = require('fs');
 const os = require('os');
 const { execFile } = require('child_process');
 const db = require('./db');
+const { processInvoiceFile } = require('./ocrService');
+const { matchParty, matchItems } = require('./matchingService');
 
 const isDev = !app.isPackaged;
+const OCR_SETTINGS_FILE = 'ocr-settings.json';
+
+function getOcrSettingsPath() {
+  return path.join(app.getPath('userData'), OCR_SETTINGS_FILE);
+}
+
+function readOcrSettings() {
+  const settingsPath = getOcrSettingsPath();
+  if (!fs.existsSync(settingsPath)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+  } catch (_error) {
+    return {};
+  }
+}
+
+function writeOcrSettings(next) {
+  const settingsPath = getOcrSettingsPath();
+  fs.writeFileSync(settingsPath, JSON.stringify(next, null, 2), 'utf8');
+}
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
@@ -47,6 +69,7 @@ ipcMain.handle('party:list', async () => db.listParties());
 ipcMain.handle('party:create', async (_event, payload) => db.upsertParty(payload));
 
 ipcMain.handle('item:list', async () => db.listItems());
+ipcMain.handle('item:getDetails', async (_event, itemId) => db.getItemDetails(Number(itemId)));
 ipcMain.handle('unit:list', async () => db.listUnits());
 ipcMain.handle('taxCode:list', async () => db.listTaxCodes());
 ipcMain.handle('item:create', async (_event, payload) => db.upsertItem(payload));
@@ -55,13 +78,49 @@ ipcMain.handle('batch:list', async (_event, itemId) => db.listBatches(itemId));
 ipcMain.handle('batch:create', async (_event, payload) => db.upsertBatch(payload));
 
 ipcMain.handle('partyRate:list', async (_event, partyId) => db.listPartyRates(partyId));
+ipcMain.handle('partyRate:forOrder', async (_event, partyId, orderType) =>
+  db.listPartyRatesForOrder(Number(partyId), orderType)
+);
 ipcMain.handle('partyRate:upsert', async (_event, payload) => db.upsertPartyRate(payload));
 
 ipcMain.handle('order:list', async () => db.listOrders());
+ipcMain.handle('report:gstr1Sales', async (_event, range) => db.listGstr1SalesReport(range || {}));
 ipcMain.handle('order:get', async (_event, orderId) => db.getOrder(Number(orderId)));
 ipcMain.handle('order:items', async (_event, orderId) => db.listOrderItems(orderId));
 ipcMain.handle('order:create', async (_event, payload) => db.createOrder(payload));
 ipcMain.handle('order:update', async (_event, orderId, payload) => db.updateOrder(Number(orderId), payload));
+ipcMain.handle('order:importPurchaseBillOcr', async (_event, payload) =>
+  db.importPurchaseBillFromOcr(payload)
+);
+ipcMain.handle('ocr:processImage', async (_event, imagePath, engine = 'tesseract') => {
+  const settings = readOcrSettings();
+  return processInvoiceFile(String(imagePath || '').trim(), String(engine || 'tesseract').toLowerCase(), {
+    apiKey: settings.googleVisionApiKey || ''
+  });
+});
+ipcMain.handle('ocr:matchEntities', async (_event, ocrData) => {
+  const parsed = ocrData?.parsed || ocrData || {};
+  const parties = db.listParties();
+  const items = db.listItems();
+  return {
+    party_match: matchParty(parsed?.supplier || {}, parties),
+    item_matches: matchItems(parsed?.items || [], items),
+    db_snapshot: {
+      parties_count: parties.length,
+      items_count: items.length
+    }
+  };
+});
+ipcMain.handle('ocr:setApiKey', async (_event, key = '') => {
+  const settings = readOcrSettings();
+  settings.googleVisionApiKey = String(key || '').trim();
+  writeOcrSettings(settings);
+  return { ok: true };
+});
+ipcMain.handle('ocr:getApiKey', async () => {
+  const settings = readOcrSettings();
+  return String(settings.googleVisionApiKey || '');
+});
 ipcMain.handle('debug:dbInfo', async () => db.getDbInfo());
 ipcMain.handle('debug:orders', async () => db.getOrdersDiagnostics());
 

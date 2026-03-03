@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('vyapar', {
   createParty: (payload) => ipcRenderer.invoke('party:create', payload),
 
   listItems: () => ipcRenderer.invoke('item:list'),
+  getItemDetails: (itemId) => ipcRenderer.invoke('item:getDetails', itemId),
   listUnits: () => ipcRenderer.invoke('unit:list'),
   listTaxCodes: () => ipcRenderer.invoke('taxCode:list'),
   createItem: (payload) => ipcRenderer.invoke('item:create', payload),
@@ -16,13 +17,20 @@ contextBridge.exposeInMainWorld('vyapar', {
   createBatch: (payload) => ipcRenderer.invoke('batch:create', payload),
 
   listPartyRates: (partyId) => ipcRenderer.invoke('partyRate:list', partyId),
+  listPartyRatesForOrder: (partyId, orderType) => ipcRenderer.invoke('partyRate:forOrder', partyId, orderType),
   upsertPartyRate: (payload) => ipcRenderer.invoke('partyRate:upsert', payload),
 
   listOrders: () => ipcRenderer.invoke('order:list'),
+  getGstr1SalesReport: (range) => ipcRenderer.invoke('report:gstr1Sales', range),
   listOrderItems: (orderId) => ipcRenderer.invoke('order:items', orderId),
   getOrder: (orderId) => ipcRenderer.invoke('order:get', orderId),
   createOrder: (payload) => ipcRenderer.invoke('order:create', payload),
   updateOrder: (orderId, payload) => ipcRenderer.invoke('order:update', orderId, payload),
+  importPurchaseBillOcr: (payload) => ipcRenderer.invoke('order:importPurchaseBillOcr', payload),
+  processInvoiceImage: (imagePath, engine) => ipcRenderer.invoke('ocr:processImage', imagePath, engine),
+  matchInvoiceEntities: (ocrData) => ipcRenderer.invoke('ocr:matchEntities', ocrData),
+  setOcrApiKey: (key) => ipcRenderer.invoke('ocr:setApiKey', key),
+  getOcrApiKey: () => ipcRenderer.invoke('ocr:getApiKey'),
   getDbInfo: () => ipcRenderer.invoke('debug:dbInfo'),
   getOrdersDiagnostics: () => ipcRenderer.invoke('debug:orders'),
   getUserDataPath: () => ipcRenderer.invoke('app:userDataPath'),

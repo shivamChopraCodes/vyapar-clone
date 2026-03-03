@@ -259,6 +259,22 @@ function initSchema() {
       lineitem_txn_po_ref_number VARCHAR(50) DEFAULT NULL,
       icf_values VARCHAR DEFAULT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS kb_item_stock_tracking (
+      ist_id integer PRIMARY KEY AUTOINCREMENT,
+      ist_batch_number varchar(30) DEFAULT '',
+      ist_serial_number varchar(30) DEFAULT '',
+      ist_mrp double DEFAULT 0,
+      ist_expiry_date datetime DEFAULT null,
+      ist_manufacturing_date datetime DEFAULT null,
+      ist_size varchar(100) DEFAULT '',
+      ist_item_id integer DEFAULT null,
+      ist_current_quantity double DEFAULT 0,
+      ist_opening_quantity double DEFAULT 0,
+      ist_type integer DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS STOCK_ITEM ON kb_item_stock_tracking (ist_item_id);
   `;
   db.exec(schema);
   ensureFirmColumns();
@@ -462,6 +478,7 @@ function listItems() {
               i.item_hsn_sac_code as hsn,
               COALESCE(t.tax_rate, 0) as gst_rate,
               COALESCE(i.item_sale_unit_price, i.item_purchase_unit_price, 0) as base_rate,
+              COALESCE(i.item_stock_quantity, 0) as stock_qty,
               i.base_unit_id,
               COALESCE(u.unit_short_name, u.unit_name, '') as base_unit
        FROM kb_items i
@@ -470,6 +487,106 @@ function listItems() {
        ORDER BY i.item_id DESC`
     )
     .all();
+}
+
+function getItemDetails(itemId) {
+  const db = getDb();
+  const resolvedItemId = Number(itemId);
+  if (!Number.isFinite(resolvedItemId) || resolvedItemId <= 0) {
+    throw new Error('Invalid item id');
+  }
+
+  const item = db
+    .prepare(
+      `SELECT i.item_id as id,
+              i.item_name as name,
+              i.item_hsn_sac_code as hsn,
+              COALESCE(t.tax_rate, 0) as gst_rate,
+              COALESCE(i.item_sale_unit_price, i.item_purchase_unit_price, 0) as base_rate,
+              COALESCE(i.item_stock_quantity, 0) as stock_qty,
+              COALESCE(u.unit_short_name, u.unit_name, '') as base_unit
+       FROM kb_items i
+       LEFT JOIN kb_tax_code t ON t.tax_code_id = i.item_tax_id
+       LEFT JOIN kb_item_units u ON u.unit_id = i.base_unit_id
+       WHERE i.item_id = ?`
+    )
+    .get(resolvedItemId);
+  if (!item) return null;
+
+  const inventory = db
+    .prepare(
+      `SELECT COALESCE(SUM(COALESCE(ist_current_quantity, 0)), 0) as batch_stock_qty,
+              COUNT(*) as batches_count
+       FROM kb_item_stock_tracking
+       WHERE ist_item_id = ?`
+    )
+    .get(resolvedItemId);
+
+  const movement = db
+    .prepare(
+      `SELECT COALESCE(SUM(CASE WHEN t.txn_type = 1 THEN COALESCE(l.quantity, 0) ELSE 0 END), 0) as sale_qty,
+              COALESCE(SUM(CASE WHEN t.txn_type = 3 THEN COALESCE(l.quantity, 0) ELSE 0 END), 0) as purchase_qty,
+              SUM(CASE WHEN t.txn_type = 3 AND lower(COALESCE(t.txn_description, '')) LIKE '%ocr import%' THEN 1 ELSE 0 END) as ocr_import_lines
+       FROM kb_lineitems l
+       JOIN kb_transactions t ON t.txn_id = l.lineitem_txn_id
+       WHERE l.item_id = ?
+         AND t.txn_type IN (1, 3)`
+    )
+    .get(resolvedItemId);
+
+  const linkedOrders = db
+    .prepare(
+      `SELECT t.txn_id as order_id,
+              t.txn_type,
+              t.txn_date as order_date,
+              t.txn_ref_number_char as invoice_no,
+              COALESCE(n.full_name, '') as party_name,
+              COALESCE(l.quantity, 0) as qty,
+              COALESCE(l.priceperunit, 0) as rate,
+              COALESCE(l.total_amount, 0) as line_total,
+              COALESCE(l.lineitem_batch_number, '') as batch_no,
+              COALESCE(l.lineitem_expiry_date, '') as expiry_date,
+              COALESCE(t.txn_description, '') as notes
+       FROM kb_lineitems l
+       JOIN kb_transactions t ON t.txn_id = l.lineitem_txn_id
+       LEFT JOIN kb_names n ON n.name_id = t.txn_name_id
+       WHERE l.item_id = ?
+         AND t.txn_type IN (1, 3)
+       ORDER BY COALESCE(t.txn_date, '') DESC, t.txn_id DESC, l.lineitem_id DESC`
+    )
+    .all(resolvedItemId)
+    .map((row) => ({
+      order_id: row.order_id,
+      order_type: row.txn_type === 3 ? 'purchase' : 'sale',
+      order_date: row.order_date,
+      invoice_no: row.invoice_no || '',
+      party_name: row.party_name || '—',
+      qty: Number(row.qty || 0),
+      rate: Number(row.rate || 0),
+      line_total: Number(row.line_total || 0),
+      batch_no: row.batch_no || '',
+      expiry_date: row.expiry_date || '',
+      source: /ocr import/i.test(row.notes || '') ? 'ocr_import' : 'manual'
+    }));
+
+  return {
+    item: {
+      ...item,
+      stock_qty: Number(item.stock_qty || 0),
+      gst_rate: Number(item.gst_rate || 0),
+      base_rate: Number(item.base_rate || 0)
+    },
+    inventory: {
+      system_stock_qty: Number(item.stock_qty || 0),
+      batch_stock_qty: Number(inventory?.batch_stock_qty || 0),
+      batches_count: Number(inventory?.batches_count || 0),
+      sale_qty: Number(movement?.sale_qty || 0),
+      purchase_qty: Number(movement?.purchase_qty || 0),
+      ocr_import_lines: Number(movement?.ocr_import_lines || 0)
+    },
+    batches: listBatches(resolvedItemId),
+    linked_orders: linkedOrders
+  };
 }
 
 function listUnits() {
@@ -550,21 +667,204 @@ function upsertItem(data) {
 
 function listBatches(itemId) {
   return getDb()
-    .prepare('SELECT * FROM kb_lineitems WHERE item_id = ? ORDER BY lineitem_id DESC')
+    .prepare(
+      `SELECT ist_id as id,
+              ist_item_id as item_id,
+              ist_batch_number as batch_no,
+              ist_expiry_date as expiry_date,
+              COALESCE(ist_mrp, 0) as mrp,
+              COALESCE(ist_current_quantity, 0) as qty
+       FROM kb_item_stock_tracking
+       WHERE ist_item_id = ?
+       ORDER BY ist_id DESC`
+    )
     .all(itemId)
     .map((row) => ({
-      id: row.lineitem_id,
+      id: row.id,
       item_id: row.item_id,
-      batch_no: row.lineitem_batch_number,
-      expiry_date: row.lineitem_expiry_date,
-      mrp: row.lineitem_mrp || 0,
-      rate: row.priceperunit || 0,
-      qty: row.quantity || 0
+      batch_no: row.batch_no,
+      expiry_date: row.expiry_date,
+      mrp: row.mrp || 0,
+      rate: 0,
+      qty: row.qty || 0
     }));
 }
 
-function upsertBatch(_data) {
-  throw new Error('Batch updates are not supported for the Vyapar schema yet.');
+function normalizeDateValue(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const date = new Date(value);
+  if (!Number.isNaN(date.getTime())) {
+    const yyyy = date.getUTCFullYear();
+    const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(date.getUTCDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  return String(value).trim() || null;
+}
+
+function normalizeBatchValue(value) {
+  return value === undefined || value === null ? '' : String(value).trim();
+}
+
+function upsertBatch(data) {
+  const db = getDb();
+  const itemId = Number(data.item_id);
+  const qty = Number(data.qty || 0);
+  const batchNo = normalizeBatchValue(data.batch_no);
+  const expiryDate = normalizeDateValue(data.expiry_date);
+  const mrp =
+    data.mrp !== undefined && data.mrp !== null && data.mrp !== ''
+      ? Number(data.mrp)
+      : null;
+  if (!Number.isFinite(itemId) || itemId <= 0) {
+    throw new Error('Invalid item_id for batch update.');
+  }
+  if (!Number.isFinite(qty) || qty === 0) {
+    throw new Error('Invalid qty for batch update.');
+  }
+
+  const findIst = db.prepare(
+    `SELECT ist_id
+     FROM kb_item_stock_tracking
+     WHERE ist_item_id = @item_id
+       AND COALESCE(ist_batch_number, '') = @batch_no
+       AND (
+         (@expiry_date IS NULL AND ist_expiry_date IS NULL)
+         OR (@expiry_date IS NOT NULL AND date(ist_expiry_date) = date(@expiry_date))
+       )
+       AND (
+         (@mrp IS NULL AND ist_mrp IS NULL)
+         OR (@mrp IS NOT NULL AND COALESCE(ist_mrp, 0) = @mrp)
+       )
+     LIMIT 1`
+  );
+  const insertIst = db.prepare(
+    `INSERT INTO kb_item_stock_tracking (
+        ist_batch_number, ist_mrp, ist_expiry_date, ist_item_id, ist_current_quantity, ist_opening_quantity, ist_type
+     ) VALUES (
+        @batch_no, @mrp, @expiry_date, @item_id, @qty, @qty, 0
+     )`
+  );
+  const updateIst = db.prepare(
+    `UPDATE kb_item_stock_tracking
+     SET ist_current_quantity = COALESCE(ist_current_quantity, 0) + @qty
+     WHERE ist_id = @ist_id`
+  );
+  const updateItemStock = db.prepare(
+    `UPDATE kb_items
+     SET item_stock_quantity = COALESCE(item_stock_quantity, 0) + @qty
+     WHERE item_id = @item_id`
+  );
+
+  return db.transaction(() => {
+    const existing = findIst.get({ item_id: itemId, batch_no: batchNo, expiry_date: expiryDate, mrp });
+    let istId;
+    if (existing) {
+      istId = Number(existing.ist_id);
+      updateIst.run({ qty, ist_id: istId });
+    } else {
+      istId = Number(
+        insertIst.run({ item_id: itemId, batch_no: batchNo, expiry_date: expiryDate, mrp, qty }).lastInsertRowid
+      );
+    }
+    updateItemStock.run({ qty, item_id: itemId });
+    return { id: istId, item_id: itemId, batch_no: batchNo, expiry_date: expiryDate, mrp: mrp || 0, qty };
+  })();
+}
+
+function buildStockAdjusters(db) {
+  const findIstByLine = db.prepare(
+    `SELECT ist_id
+     FROM kb_item_stock_tracking
+     WHERE ist_item_id = @item_id
+       AND COALESCE(ist_batch_number, '') = @batch_no
+       AND (
+         (@expiry_date IS NULL AND ist_expiry_date IS NULL)
+         OR (@expiry_date IS NOT NULL AND date(ist_expiry_date) = date(@expiry_date))
+       )
+       AND (
+         (@mrp IS NULL AND ist_mrp IS NULL)
+         OR (@mrp IS NOT NULL AND COALESCE(ist_mrp, 0) = @mrp)
+       )
+     LIMIT 1`
+  );
+  const insertIst = db.prepare(
+    `INSERT INTO kb_item_stock_tracking (
+        ist_batch_number, ist_mrp, ist_expiry_date, ist_item_id, ist_current_quantity, ist_opening_quantity, ist_type
+     ) VALUES (
+        @batch_no, @mrp, @expiry_date, @item_id, @qty, @qty, 0
+     )`
+  );
+  const updateIstQty = db.prepare(
+    `UPDATE kb_item_stock_tracking
+     SET ist_current_quantity = COALESCE(ist_current_quantity, 0) + @delta
+     WHERE ist_id = @ist_id`
+  );
+  const updateItemQty = db.prepare(
+    `UPDATE kb_items
+     SET item_stock_quantity = COALESCE(item_stock_quantity, 0) + @delta
+     WHERE item_id = @item_id`
+  );
+
+  const resolveIstId = (line, createIfMissing) => {
+    const itemId = Number(line.item_id);
+    if (!Number.isFinite(itemId) || itemId <= 0) return null;
+    const batchNo = normalizeBatchValue(line.batch_no);
+    const expiryDate = normalizeDateValue(line.expiry_date);
+    const mrp =
+      line.mrp !== undefined && line.mrp !== null && line.mrp !== '' ? Number(line.mrp) : null;
+    const existing = findIstByLine.get({
+      item_id: itemId,
+      batch_no: batchNo,
+      expiry_date: expiryDate,
+      mrp
+    });
+    if (existing) return Number(existing.ist_id);
+    if (!createIfMissing) return null;
+    return Number(
+      insertIst.run({
+        batch_no: batchNo,
+        mrp,
+        expiry_date: expiryDate,
+        item_id: itemId,
+        qty: 0
+      }).lastInsertRowid
+    );
+  };
+
+  const applyPurchaseLineStock = (line) => {
+    const qty = Number(line.qty || line.quantity || 0);
+    const itemId = Number(line.item_id);
+    if (!Number.isFinite(itemId) || itemId <= 0 || !Number.isFinite(qty) || qty === 0) {
+      return null;
+    }
+    const istId = resolveIstId(line, true);
+    if (istId) {
+      updateIstQty.run({ delta: qty, ist_id: istId });
+    }
+    updateItemQty.run({ delta: qty, item_id: itemId });
+    return istId;
+  };
+
+  const rollbackPurchaseLineStock = (line) => {
+    const qty = Number(line.qty || line.quantity || 0);
+    const itemId = Number(line.item_id);
+    if (!Number.isFinite(itemId) || itemId <= 0 || !Number.isFinite(qty) || qty === 0) {
+      return;
+    }
+    const explicitIstId =
+      line.lineitem_ist_id !== undefined && line.lineitem_ist_id !== null ? Number(line.lineitem_ist_id) : null;
+    const istId = Number.isFinite(explicitIstId) && explicitIstId > 0 ? explicitIstId : resolveIstId(line, false);
+    if (istId) {
+      updateIstQty.run({ delta: -qty, ist_id: istId });
+    }
+    updateItemQty.run({ delta: -qty, item_id: itemId });
+  };
+
+  return {
+    applyPurchaseLineStock,
+    rollbackPurchaseLineStock
+  };
 }
 
 function listPartyRates(partyId) {
@@ -585,19 +885,109 @@ function listPartyRates(partyId) {
     .all(partyId);
 }
 
+function listPartyRatesForOrder(partyId, orderType = 'sale') {
+  const db = getDb();
+  const txnType = orderType === 'purchase' ? 3 : 1;
+  const invoiceRates = db
+    .prepare(
+      `SELECT l.item_id as item_id,
+              l.priceperunit as rate
+       FROM kb_lineitems l
+       JOIN kb_transactions t ON t.txn_id = l.lineitem_txn_id
+       WHERE t.txn_name_id = ?
+         AND t.txn_type = ?
+         AND l.item_id IS NOT NULL
+         AND COALESCE(l.priceperunit, 0) > 0
+       ORDER BY COALESCE(t.txn_date, '') DESC, t.txn_id DESC, l.lineitem_id DESC`
+    )
+    .all(partyId, txnType);
+
+  const rateByItem = new Map();
+  invoiceRates.forEach((row) => {
+    const key = Number(row.item_id);
+    if (!Number.isFinite(key)) return;
+    if (!rateByItem.has(key)) {
+      rateByItem.set(key, Number(row.rate || 0));
+    }
+  });
+
+  const savedRates = db
+    .prepare(
+      `SELECT party_item_rate_item_id as item_id,
+              COALESCE(party_item_rate_sale_price, 0) as sale_rate,
+              COALESCE(party_item_rate_purchase_price, 0) as purchase_rate
+       FROM kb_party_item_rate
+       WHERE party_item_rate_party_id = ?`
+    )
+    .all(partyId);
+
+  savedRates.forEach((row) => {
+    const key = Number(row.item_id);
+    if (!Number.isFinite(key)) return;
+    if (rateByItem.has(key)) return;
+    const fallback = orderType === 'purchase' ? Number(row.purchase_rate || 0) : Number(row.sale_rate || 0);
+    if (fallback > 0) rateByItem.set(key, fallback);
+  });
+
+  return Array.from(rateByItem.entries()).map(([item_id, rate]) => ({ item_id, rate }));
+}
+
 function upsertPartyRate(data) {
-  const stmt = getDb().prepare(
-    `INSERT INTO kb_party_item_rate (party_item_rate_party_id, party_item_rate_item_id, party_item_rate_sale_price)
-     VALUES (@party_id, @item_id, @rate)
-     ON CONFLICT(party_item_rate_item_id, party_item_rate_party_id)
-     DO UPDATE SET party_item_rate_sale_price = excluded.party_item_rate_sale_price`
-  );
+  const db = getDb();
+  const isPurchase = data.order_type === 'purchase';
+  const stmt = isPurchase
+    ? db.prepare(
+        `INSERT INTO kb_party_item_rate (
+            party_item_rate_party_id, party_item_rate_item_id, party_item_rate_purchase_price
+         )
+         VALUES (@party_id, @item_id, @rate)
+         ON CONFLICT(party_item_rate_item_id, party_item_rate_party_id)
+         DO UPDATE SET party_item_rate_purchase_price = excluded.party_item_rate_purchase_price`
+      )
+    : db.prepare(
+        `INSERT INTO kb_party_item_rate (
+            party_item_rate_party_id, party_item_rate_item_id, party_item_rate_sale_price
+         )
+         VALUES (@party_id, @item_id, @rate)
+         ON CONFLICT(party_item_rate_item_id, party_item_rate_party_id)
+         DO UPDATE SET party_item_rate_sale_price = excluded.party_item_rate_sale_price`
+      );
   stmt.run({
     party_id: data.party_id,
     item_id: data.item_id,
     rate: Number(data.rate || 0)
   });
   return listPartyRates(data.party_id);
+}
+
+function upsertPartyRatesFromOrder(db, partyId, txnType, items) {
+  if (!partyId || !Array.isArray(items) || !items.length) return;
+  const isPurchase = txnType === 3;
+  const stmt = isPurchase
+    ? db.prepare(
+        `INSERT INTO kb_party_item_rate (
+            party_item_rate_party_id, party_item_rate_item_id, party_item_rate_purchase_price
+         )
+         VALUES (@party_id, @item_id, @rate)
+         ON CONFLICT(party_item_rate_item_id, party_item_rate_party_id)
+         DO UPDATE SET party_item_rate_purchase_price = excluded.party_item_rate_purchase_price`
+      )
+    : db.prepare(
+        `INSERT INTO kb_party_item_rate (
+            party_item_rate_party_id, party_item_rate_item_id, party_item_rate_sale_price
+         )
+         VALUES (@party_id, @item_id, @rate)
+         ON CONFLICT(party_item_rate_item_id, party_item_rate_party_id)
+         DO UPDATE SET party_item_rate_sale_price = excluded.party_item_rate_sale_price`
+      );
+
+  items.forEach((line) => {
+    const itemId = Number(line.item_id);
+    const rate = Number(line.rate || line.priceperunit || 0);
+    if (!Number.isFinite(itemId) || itemId <= 0) return;
+    if (!Number.isFinite(rate) || rate <= 0) return;
+    stmt.run({ party_id: Number(partyId), item_id: itemId, rate });
+  });
 }
 
 function listOrders() {
@@ -641,6 +1031,94 @@ function listOrders() {
       discount_amount: Number(row.discount_amount || 0),
       header_total: Number(row.header_total || 0)
     }));
+}
+
+function listGstr1SalesReport(range = {}) {
+  const db = getDb();
+  const fromDate = String(range?.from_date || '').trim();
+  const toDate = String(range?.to_date || '').trim();
+  if (!fromDate || !toDate) {
+    throw new Error('from_date and to_date are required');
+  }
+
+  const company = db
+    .prepare(
+      `SELECT COALESCE(firm_gstin_number, '') as gstin,
+              COALESCE(firm_name, '') as legal_name,
+              COALESCE(firm_state, '') as state
+       FROM kb_firms
+       ORDER BY firm_id DESC
+       LIMIT 1`
+    )
+    .get() || { gstin: '', legal_name: '', state: '' };
+
+  const rows = db
+    .prepare(
+      `SELECT t.txn_id as order_id,
+              t.txn_date as invoice_date,
+              t.txn_ref_number_char as invoice_no,
+              COALESCE(n.name_gstin_number, '') as party_gstin,
+              COALESCE(n.full_name, '') as party_name,
+              COALESCE(NULLIF(TRIM(t.txn_place_of_supply), ''), n.name_state, '') as place_of_supply,
+              COALESCE(tc.tax_rate, itax.tax_rate, 0) as gst_rate,
+              SUM(COALESCE(l.total_amount, COALESCE(l.quantity, 0) * COALESCE(l.priceperunit, 0))) as taxable_value
+       FROM kb_transactions t
+       JOIN kb_lineitems l ON l.lineitem_txn_id = t.txn_id
+       LEFT JOIN kb_names n ON n.name_id = t.txn_name_id
+       LEFT JOIN kb_tax_code tc ON tc.tax_code_id = l.lineitem_tax_id
+       LEFT JOIN kb_items i ON i.item_id = l.item_id
+       LEFT JOIN kb_tax_code itax ON itax.tax_code_id = i.item_tax_id
+       WHERE t.txn_type = 1
+         AND date(t.txn_date) >= date(@from_date)
+         AND date(t.txn_date) <= date(@to_date)
+       GROUP BY t.txn_id,
+                t.txn_date,
+                t.txn_ref_number_char,
+                n.name_gstin_number,
+                n.full_name,
+                place_of_supply,
+                gst_rate
+       ORDER BY date(t.txn_date) ASC, t.txn_id ASC`
+    )
+    .all({ from_date: fromDate, to_date: toDate })
+    .map((row) => {
+      const rate = Number(row.gst_rate || 0);
+      const taxable = Number(row.taxable_value || 0);
+      const taxAmount = taxable * (rate / 100);
+      const invoiceValue = taxable + taxAmount;
+      const isInterState =
+        company.state &&
+        row.place_of_supply &&
+        String(company.state).trim().toLowerCase() !== String(row.place_of_supply).trim().toLowerCase();
+
+      return {
+        gstin_uin: row.party_gstin || '',
+        party_name: row.party_name || '',
+        transaction_type: 'Sale',
+        invoice_no: row.invoice_no || String(row.order_id),
+        invoice_date: row.invoice_date || '',
+        invoice_value: Number(invoiceValue.toFixed(2)),
+        rate: Number(rate.toFixed(2)),
+        cess_rate: 0,
+        taxable_value: Number(taxable.toFixed(2)),
+        reverse_charge: 'N',
+        integrated_tax_amount: isInterState ? Number(taxAmount.toFixed(2)) : 0,
+        central_tax_amount: isInterState ? 0 : Number((taxAmount / 2).toFixed(2)),
+        state_ut_tax_amount: isInterState ? 0 : Number((taxAmount / 2).toFixed(2)),
+        cess_amount: 0,
+        place_of_supply: row.place_of_supply || '',
+        order_id: row.order_id
+      };
+    });
+
+  return {
+    company: {
+      gstin: company.gstin || '',
+      legal_name: company.legal_name || '',
+      trade_name: ''
+    },
+    rows
+  };
 }
 
 function getOrder(orderId) {
@@ -714,6 +1192,17 @@ function updateOrder(orderId, order) {
      WHERE txn_id = @txn_id`
   );
   const deleteLines = db.prepare('DELETE FROM kb_lineitems WHERE lineitem_txn_id = ?');
+  const selectOrderTxnType = db.prepare('SELECT txn_type FROM kb_transactions WHERE txn_id = ?');
+  const selectExistingLines = db.prepare(
+    `SELECT item_id,
+            quantity,
+            lineitem_batch_number as batch_no,
+            lineitem_expiry_date as expiry_date,
+            lineitem_mrp as mrp,
+            lineitem_ist_id
+     FROM kb_lineitems
+     WHERE lineitem_txn_id = ?`
+  );
   const insertLine = db.prepare(
     `INSERT INTO kb_lineitems (
         lineitem_txn_id,
@@ -723,6 +1212,7 @@ function updateOrder(orderId, order) {
         total_amount,
         lineitem_tax_id,
         lineitem_unit_id,
+        lineitem_ist_id,
         lineitem_batch_number,
         lineitem_expiry_date,
         lineitem_mrp
@@ -735,6 +1225,7 @@ function updateOrder(orderId, order) {
         @total_amount,
         @lineitem_tax_id,
         @lineitem_unit_id,
+        @lineitem_ist_id,
         @lineitem_batch_number,
         @lineitem_expiry_date,
         @lineitem_mrp
@@ -742,6 +1233,9 @@ function updateOrder(orderId, order) {
   );
 
   const trx = db.transaction((payload) => {
+    const stockAdjusters = buildStockAdjusters(db);
+    const existingOrder = selectOrderTxnType.get(orderId);
+    if (!existingOrder) throw new Error('Order not found.');
     const invoiceTotal = (payload.items || []).reduce((sum, item) => {
       const qty = Number(item.qty || 0);
       const rate = Number(item.rate || 0);
@@ -772,6 +1266,11 @@ function updateOrder(orderId, order) {
       txn_cash_amount: cashAmount,
       txn_balance_amount: clampedBalance
     });
+
+    if (existingOrder.txn_type === 3) {
+      const oldLines = selectExistingLines.all(orderId);
+      oldLines.forEach((line) => stockAdjusters.rollbackPurchaseLineStock(line));
+    }
 
     deleteLines.run(orderId);
 
@@ -809,6 +1308,28 @@ function updateOrder(orderId, order) {
           : (
               db.prepare('SELECT base_unit_id FROM kb_items WHERE item_id = ?').get(item.item_id) || {}
             ).base_unit_id;
+      let lineIstId = null;
+      if (txnType === 3) {
+        lineIstId = stockAdjusters.applyPurchaseLineStock(item);
+        const purchaseRate = Number(item.rate || 0);
+        if (item.hsn && String(item.hsn).trim()) {
+          db.prepare(
+            `UPDATE kb_items
+             SET item_hsn_sac_code = @hsn,
+                 item_purchase_unit_price = CASE WHEN @purchase_rate > 0 THEN @purchase_rate ELSE item_purchase_unit_price END
+             WHERE item_id = @item_id`
+          ).run({
+            hsn: String(item.hsn).trim(),
+            purchase_rate: purchaseRate,
+            item_id: item.item_id
+          });
+        } else if (purchaseRate > 0) {
+          db.prepare('UPDATE kb_items SET item_purchase_unit_price = ? WHERE item_id = ?').run(
+            purchaseRate,
+            item.item_id
+          );
+        }
+      }
       insertLine.run({
         lineitem_txn_id: orderId,
         item_id: item.item_id,
@@ -817,16 +1338,32 @@ function updateOrder(orderId, order) {
         total_amount: item.qty * item.rate,
         lineitem_tax_id: taxId,
         lineitem_unit_id: Number.isFinite(Number(resolvedUnitId)) ? Number(resolvedUnitId) : null,
+        lineitem_ist_id: lineIstId,
         lineitem_batch_number: item.batch_no || null,
         lineitem_expiry_date: item.expiry_date || null,
         lineitem_mrp: item.mrp !== undefined && item.mrp !== null ? Number(item.mrp || 0) : null
       });
     });
+    upsertPartyRatesFromOrder(db, payload.party_id || null, txnType, payload.items || []);
 
     return orderId;
   });
 
   return trx(order);
+}
+
+function getNextRefNumberByTxnType(db, txnType) {
+  const row = db
+    .prepare(
+      `SELECT MAX(CAST(TRIM(txn_ref_number_char) AS INTEGER)) as max_ref
+       FROM kb_transactions
+       WHERE txn_type = @txn_type
+         AND TRIM(COALESCE(txn_ref_number_char, '')) <> ''
+         AND TRIM(txn_ref_number_char) NOT GLOB '*[^0-9]*'`
+    )
+    .get({ txn_type: txnType });
+  const maxRef = Number(row?.max_ref || 0);
+  return String((Number.isFinite(maxRef) ? maxRef : 0) + 1);
 }
 
 function createOrder(order) {
@@ -856,6 +1393,7 @@ function createOrder(order) {
         total_amount,
         lineitem_tax_id,
         lineitem_unit_id,
+        lineitem_ist_id,
         lineitem_batch_number,
         lineitem_expiry_date,
         lineitem_mrp
@@ -868,6 +1406,7 @@ function createOrder(order) {
         @total_amount,
         @lineitem_tax_id,
         @lineitem_unit_id,
+        @lineitem_ist_id,
         @lineitem_batch_number,
         @lineitem_expiry_date,
         @lineitem_mrp
@@ -875,6 +1414,9 @@ function createOrder(order) {
   );
 
   const trx = db.transaction((payload) => {
+    const stockAdjusters = buildStockAdjusters(db);
+    const manualInvoiceNo = String(payload.invoice_no || '').trim();
+    const nextInvoiceNo = manualInvoiceNo || getNextRefNumberByTxnType(db, txnType);
     const invoiceTotal = (payload.items || []).reduce((sum, item) => {
       const qty = Number(item.qty || 0);
       const rate = Number(item.rate || 0);
@@ -898,7 +1440,7 @@ function createOrder(order) {
       txn_type: txnType,
       txn_name_id: payload.party_id || null,
       txn_date: payload.order_date,
-      txn_ref_number_char: payload.invoice_no || '',
+      txn_ref_number_char: nextInvoiceNo,
       txn_description: payload.notes || '',
       txn_place_of_supply: placeOfSupply,
       txn_time: 0,
@@ -916,6 +1458,28 @@ function createOrder(order) {
           ? Number(item.unit_id)
           : (db.prepare('SELECT base_unit_id FROM kb_items WHERE item_id = ?').get(item.item_id) || {})
               .base_unit_id;
+      let lineIstId = null;
+      if (txnType === 3) {
+        lineIstId = stockAdjusters.applyPurchaseLineStock(item);
+        const purchaseRate = Number(item.rate || 0);
+        if (item.hsn && String(item.hsn).trim()) {
+          db.prepare(
+            `UPDATE kb_items
+             SET item_hsn_sac_code = @hsn,
+                 item_purchase_unit_price = CASE WHEN @purchase_rate > 0 THEN @purchase_rate ELSE item_purchase_unit_price END
+             WHERE item_id = @item_id`
+          ).run({
+            hsn: String(item.hsn).trim(),
+            purchase_rate: purchaseRate,
+            item_id: item.item_id
+          });
+        } else if (purchaseRate > 0) {
+          db.prepare('UPDATE kb_items SET item_purchase_unit_price = ? WHERE item_id = ?').run(
+            purchaseRate,
+            item.item_id
+          );
+        }
+      }
       insertLine.run({
         lineitem_txn_id: orderId,
         item_id: item.item_id,
@@ -924,11 +1488,13 @@ function createOrder(order) {
         total_amount: item.qty * item.rate,
         lineitem_tax_id: tax ? tax.item_tax_id : null,
         lineitem_unit_id: Number.isFinite(Number(resolvedUnitId)) ? Number(resolvedUnitId) : null,
+        lineitem_ist_id: lineIstId,
         lineitem_batch_number: item.batch_no || null,
         lineitem_expiry_date: item.expiry_date || null,
         lineitem_mrp: item.mrp !== undefined && item.mrp !== null ? Number(item.mrp || 0) : null
       });
     });
+    upsertPartyRatesFromOrder(db, payload.party_id || null, txnType, payload.items || []);
 
     return orderId;
   });
@@ -937,6 +1503,198 @@ function createOrder(order) {
   return db
     .prepare('SELECT txn_id as id, txn_type, txn_date as order_date, txn_description as notes FROM kb_transactions WHERE txn_id = ?')
     .get(orderId);
+}
+
+function importPurchaseBillFromOcr(payload) {
+  const db = getDb();
+  const rawSupplier = payload?.supplier || {};
+  const rawBill = payload?.bill || {};
+  const rawItems = Array.isArray(payload?.items) ? payload.items : [];
+  if (!rawItems.length) {
+    throw new Error('At least one item is required.');
+  }
+
+  const findPartyById = db.prepare('SELECT name_id FROM kb_names WHERE name_id = ? LIMIT 1');
+  const findPartyByName = db.prepare(
+    `SELECT name_id
+     FROM kb_names
+     WHERE lower(trim(full_name)) = lower(trim(?))
+     LIMIT 1`
+  );
+  const insertParty = db.prepare(
+    `INSERT INTO kb_names (full_name, phone_number, address, name_gstin_number, name_state, name_type, name_is_active)
+     VALUES (@name, @phone, @address, @gst_number, @state_of_supply, 1, 1)`
+  );
+  const patchParty = db.prepare(
+    `UPDATE kb_names
+     SET date_modified = CURRENT_TIMESTAMP,
+         phone_number = CASE WHEN trim(COALESCE(phone_number, '')) = '' AND trim(COALESCE(@phone, '')) <> '' THEN @phone ELSE phone_number END,
+         address = CASE WHEN trim(COALESCE(address, '')) = '' AND trim(COALESCE(@address, '')) <> '' THEN @address ELSE address END,
+         name_gstin_number = CASE WHEN trim(COALESCE(name_gstin_number, '')) = '' AND trim(COALESCE(@gst_number, '')) <> '' THEN @gst_number ELSE name_gstin_number END,
+         name_state = CASE WHEN trim(COALESCE(name_state, '')) = '' AND trim(COALESCE(@state_of_supply, '')) <> '' THEN @state_of_supply ELSE name_state END
+     WHERE name_id = @party_id`
+  );
+
+  const findItemById = db.prepare('SELECT item_id FROM kb_items WHERE item_id = ? LIMIT 1');
+  const findItemByName = db.prepare(
+    `SELECT item_id
+     FROM kb_items
+     WHERE lower(trim(item_name)) = lower(trim(?))
+     LIMIT 1`
+  );
+  const insertItem = db.prepare(
+    `INSERT INTO kb_items (item_name, item_hsn_sac_code, item_sale_unit_price, item_purchase_unit_price, item_tax_id)
+     VALUES (@name, @hsn, @base_rate, @base_rate, @tax_id)`
+  );
+  const patchItem = db.prepare(
+    `UPDATE kb_items
+     SET item_date_modified = CURRENT_TIMESTAMP,
+         item_hsn_sac_code = CASE WHEN trim(COALESCE(@hsn, '')) <> '' THEN @hsn ELSE item_hsn_sac_code END,
+         item_purchase_unit_price = CASE WHEN @purchase_rate > 0 THEN @purchase_rate ELSE item_purchase_unit_price END,
+         item_tax_id = CASE WHEN @tax_id IS NOT NULL THEN @tax_id ELSE item_tax_id END
+     WHERE item_id = @item_id`
+  );
+  const findTaxByRate = db.prepare('SELECT tax_code_id FROM kb_tax_code WHERE tax_rate = ? LIMIT 1');
+  const insertTax = db.prepare(
+    `INSERT INTO kb_tax_code (tax_code_name, tax_rate, tax_code_type, tax_rate_type)
+     VALUES (?, ?, 0, 4)`
+  );
+
+  const ensureTaxId = (rateValue) => {
+    const rate = Number(rateValue || 0);
+    if (!Number.isFinite(rate) || rate <= 0) return null;
+    const existing = findTaxByRate.get(rate);
+    if (existing) return existing.tax_code_id;
+    return insertTax.run(`GST@${rate}%`, rate).lastInsertRowid;
+  };
+
+  return db.transaction(() => {
+    const supplierIdFromPayload =
+      payload?.party_id ?? rawSupplier?.id ?? rawSupplier?.party_id ?? null;
+    const supplierName =
+      String(
+        rawSupplier?.name ||
+          rawSupplier?.full_name ||
+          payload?.party_name ||
+          payload?.supplier_name ||
+          ''
+      ).trim();
+    if (!supplierIdFromPayload && !supplierName) {
+      throw new Error('Supplier (party) is required.');
+    }
+    let partyId = null;
+    if (supplierIdFromPayload !== null && supplierIdFromPayload !== undefined) {
+      const found = findPartyById.get(Number(supplierIdFromPayload));
+      if (found) partyId = Number(found.name_id);
+    }
+    if (!partyId && supplierName) {
+      const found = findPartyByName.get(supplierName);
+      if (found) partyId = Number(found.name_id);
+    }
+    if (!partyId) {
+      partyId = Number(
+        insertParty.run({
+          name: supplierName,
+          phone: String(rawSupplier?.phone || payload?.supplier_phone || '').trim(),
+          address: String(rawSupplier?.address || payload?.supplier_address || '').trim(),
+          gst_number: String(rawSupplier?.gst_number || rawSupplier?.name_gstin_number || '').trim(),
+          state_of_supply: String(rawSupplier?.state_of_supply || rawSupplier?.name_state || '').trim()
+        }).lastInsertRowid
+      );
+    } else {
+      patchParty.run({
+        party_id: partyId,
+        phone: String(rawSupplier?.phone || payload?.supplier_phone || '').trim(),
+        address: String(rawSupplier?.address || payload?.supplier_address || '').trim(),
+        gst_number: String(rawSupplier?.gst_number || rawSupplier?.name_gstin_number || '').trim(),
+        state_of_supply: String(rawSupplier?.state_of_supply || rawSupplier?.name_state || '').trim()
+      });
+    }
+
+    const normalizedItems = rawItems.map((line) => {
+      const qty = Number(line.qty ?? line.quantity ?? 0);
+      const amount = Number(line.amount ?? line.total_amount ?? 0);
+      const fallbackRate = qty > 0 && amount > 0 ? amount / qty : 0;
+      const rate = Number(line.rate ?? line.priceperunit ?? fallbackRate ?? 0);
+      const gstRate = Number(line.gst_rate ?? line.gst ?? line.tax_rate ?? 0);
+      const hsn = String(line.hsn || line.hsn_sac_code || '').trim();
+      const itemName = String(line.item_name || line.name || '').trim();
+      const itemIdRaw = line.item_id ?? line.id ?? null;
+      let itemId = null;
+      if (itemIdRaw !== null && itemIdRaw !== undefined) {
+        const foundById = findItemById.get(Number(itemIdRaw));
+        if (foundById) itemId = Number(foundById.item_id);
+      }
+      if (!itemId && itemName) {
+        const foundByName = findItemByName.get(itemName);
+        if (foundByName) itemId = Number(foundByName.item_id);
+      }
+      if (!itemId) {
+        if (!itemName) {
+          throw new Error('Item name is required for new items.');
+        }
+        itemId = Number(
+          insertItem.run({
+            name: itemName,
+            hsn,
+            base_rate: Number.isFinite(rate) && rate > 0 ? rate : 0,
+            tax_id: ensureTaxId(gstRate)
+          }).lastInsertRowid
+        );
+      } else {
+        patchItem.run({
+          item_id: itemId,
+          hsn,
+          purchase_rate: Number.isFinite(rate) ? rate : 0,
+          tax_id: ensureTaxId(gstRate)
+        });
+      }
+      if (!Number.isFinite(qty) || qty <= 0) {
+        throw new Error(`Invalid quantity for item ${itemName || itemId}.`);
+      }
+      if (!Number.isFinite(rate) || rate < 0) {
+        throw new Error(`Invalid rate for item ${itemName || itemId}.`);
+      }
+
+      return {
+        item_id: itemId,
+        unit_id: line.unit_id ?? null,
+        hsn,
+        batch_no: normalizeBatchValue(line.batch_no || line.batch || ''),
+        expiry_date: normalizeDateValue(line.expiry_date || line.expiry || ''),
+        mrp: line.mrp ?? null,
+        gst_rate: Number.isFinite(gstRate) ? gstRate : 0,
+        qty,
+        rate
+      };
+    });
+
+    const placeOfSupply =
+      String(rawBill?.place_of_supply || payload?.place_of_supply || rawSupplier?.state_of_supply || '').trim();
+    const orderPayload = {
+      order_type: 'purchase',
+      party_id: partyId,
+      order_date: String(rawBill?.order_date || rawBill?.bill_date || payload?.order_date || '').trim(),
+      invoice_no: String(rawBill?.invoice_no || rawBill?.bill_no || payload?.invoice_no || '').trim(),
+      notes: String(rawBill?.notes || payload?.notes || '').trim(),
+      place_of_supply: placeOfSupply,
+      balance_amount: Number(rawBill?.balance_amount ?? payload?.balance_amount ?? 0),
+      items: normalizedItems
+    };
+    if (!orderPayload.order_date) {
+      const now = new Date();
+      orderPayload.order_date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+        now.getDate()
+      ).padStart(2, '0')}`;
+    }
+
+    const createdOrder = createOrder(orderPayload);
+    return {
+      order: createdOrder,
+      party_id: partyId,
+      items_count: normalizedItems.length
+    };
+  })();
 }
 
 function importFromVyaparDump(dumpPath) {
@@ -1167,6 +1925,7 @@ function importFromVyaparSqlite(sqlitePath) {
     'kb_firms',
     'kb_names',
     'kb_items',
+    'kb_item_stock_tracking',
     'kb_tax_code',
     'kb_party_item_rate',
     'kb_transactions',
@@ -1252,18 +2011,22 @@ module.exports = {
   listParties,
   upsertParty,
   listItems,
+  getItemDetails,
   listUnits,
   listTaxCodes,
   upsertItem,
   listBatches,
   upsertBatch,
   listPartyRates,
+  listPartyRatesForOrder,
   upsertPartyRate,
   listOrders,
+  listGstr1SalesReport,
   getOrder,
   listOrderItems,
   createOrder,
   updateOrder,
+  importPurchaseBillFromOcr,
   importFromVyaparDump,
   importFromVyaparSqlite,
   getDbInfo,

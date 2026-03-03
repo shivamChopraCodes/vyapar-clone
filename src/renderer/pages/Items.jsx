@@ -1,7 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
 import Label from '../components/ui/Label';
+import SearchableSelect from '../components/ui/SearchableSelect';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/Card';
 import { Table, TBody, TD, TH, THead, TR } from '../components/ui/Table';
 import baseUnits from '../data/baseUnits';
@@ -25,23 +27,33 @@ const emptyBatch = {
 };
 
 export default function Items() {
+  const navigate = useNavigate();
   const [itemForm, setItemForm] = useState(emptyItem);
   const [batchForm, setBatchForm] = useState(emptyBatch);
   const [items, setItems] = useState([]);
-  const [batches, setBatches] = useState([]);
+  const [selectedItemId, setSelectedItemId] = useState('');
+  const [itemDetails, setItemDetails] = useState(null);
+  const [nameFilter, setNameFilter] = useState('');
+  const [gstFilter, setGstFilter] = useState('');
+  const [hsnFilter, setHsnFilter] = useState('');
 
   const load = async () => {
     const data = await window.vyapar.listItems();
     setItems(data);
+    if (!selectedItemId && data?.length) {
+      const first = String(data[0].id);
+      setSelectedItemId(first);
+      setBatchForm((prev) => ({ ...prev, item_id: first }));
+    }
   };
 
-  const loadBatches = async (itemId) => {
+  const loadItemDetails = async (itemId) => {
     if (!itemId) {
-      setBatches([]);
+      setItemDetails(null);
       return;
     }
-    const data = await window.vyapar.listBatches(Number(itemId));
-    setBatches(data);
+    const data = await window.vyapar.getItemDetails(Number(itemId));
+    setItemDetails(data);
   };
 
   useEffect(() => {
@@ -49,15 +61,40 @@ export default function Items() {
   }, []);
 
   useEffect(() => {
-    loadBatches(batchForm.item_id);
-  }, [batchForm.item_id]);
+    if (selectedItemId && String(batchForm.item_id || '') !== String(selectedItemId)) {
+      setBatchForm((prev) => ({ ...prev, item_id: String(selectedItemId) }));
+    }
+    loadItemDetails(selectedItemId);
+  }, [selectedItemId]);
+
+  const filteredItems = useMemo(() => {
+    const nameText = nameFilter.trim().toLowerCase();
+    const hsnText = hsnFilter.trim().toLowerCase();
+    return items.filter((item) => {
+      if (nameText && !String(item.name || '').toLowerCase().includes(nameText)) return false;
+      if (hsnText && !String(item.hsn || '').toLowerCase().includes(hsnText)) return false;
+      if (gstFilter && String(item.gst_rate) !== String(gstFilter)) return false;
+      return true;
+    });
+  }, [items, nameFilter, hsnFilter, gstFilter]);
+
+  const gstFilterOptions = useMemo(() => {
+    const unique = new Set(items.map((item) => Number(item.gst_rate || 0)));
+    return Array.from(unique)
+      .sort((a, b) => a - b)
+      .map((value) => ({ value: String(value), label: `${value}%` }));
+  }, [items]);
 
   const updateItem = (field) => (event) => {
     setItemForm((prev) => ({ ...prev, [field]: event.target.value }));
   };
 
   const updateBatch = (field) => (event) => {
-    setBatchForm((prev) => ({ ...prev, [field]: event.target.value }));
+    const value = event.target.value;
+    setBatchForm((prev) => ({ ...prev, [field]: value }));
+    if (field === 'item_id') {
+      setSelectedItemId(String(value || ''));
+    }
   };
 
   const saveItem = async (event) => {
@@ -75,6 +112,14 @@ export default function Items() {
 
   const saveBatch = async (event) => {
     event.preventDefault();
+  };
+
+  const formatDate = (value) => {
+    if (!value) return '—';
+    const raw = String(value).trim();
+    const isoMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (isoMatch) return `${isoMatch[3]}/${isoMatch[2]}/${isoMatch[1]}`;
+    return raw;
   };
 
   return (
@@ -200,6 +245,47 @@ export default function Items() {
           <CardTitle>Items</CardTitle>
         </CardHeader>
         <CardContent>
+          <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-4">
+            <div>
+              <Label>Filter by Name</Label>
+              <Input
+                value={nameFilter}
+                onChange={(event) => setNameFilter(event.target.value)}
+                placeholder="Search item name"
+              />
+            </div>
+            <div>
+              <Label>Filter by GST</Label>
+              <SearchableSelect
+                value={gstFilter}
+                options={gstFilterOptions}
+                onChange={(value) => setGstFilter(String(value || ''))}
+                placeholder="All GST rates"
+              />
+            </div>
+            <div>
+              <Label>Filter by HSN</Label>
+              <Input
+                value={hsnFilter}
+                onChange={(event) => setHsnFilter(event.target.value)}
+                placeholder="Search HSN"
+              />
+            </div>
+            <div className="flex items-end">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setNameFilter('');
+                  setGstFilter('');
+                  setHsnFilter('');
+                }}
+              >
+                Reset Filters
+              </Button>
+            </div>
+          </div>
+
           <Table>
             <THead>
               <TR>
@@ -208,50 +294,129 @@ export default function Items() {
                 <TH>GST</TH>
                 <TH>Base Rate</TH>
                 <TH>Base Unit</TH>
+                <TH>Stock Qty</TH>
               </TR>
             </THead>
             <TBody>
-              {items.map((item) => (
-                <TR key={item.id}>
+              {filteredItems.map((item) => (
+                <TR
+                  key={item.id}
+                  className={String(selectedItemId) === String(item.id) ? 'bg-accentSoft' : ''}
+                  onClick={() => setSelectedItemId(String(item.id))}
+                >
                   <TD>{item.name}</TD>
                   <TD>{item.hsn || '—'}</TD>
                   <TD>{item.gst_rate}%</TD>
                   <TD>{item.base_rate}</TD>
                   <TD>{item.base_unit || '—'}</TD>
+                  <TD>{Number(item.stock_qty || 0)}</TD>
                 </TR>
               ))}
             </TBody>
           </Table>
+          {!filteredItems.length && (
+            <p className="mt-3 text-sm text-muted">No items found for selected filters.</p>
+          )}
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle>Batches for Selected Item</CardTitle>
+          <CardTitle>Item Details</CardTitle>
         </CardHeader>
         <CardContent>
-          <Table>
-            <THead>
-              <TR>
-                <TH>Batch</TH>
-                <TH>Expiry</TH>
-                <TH>MRP</TH>
-                <TH>Rate</TH>
-                <TH>Qty</TH>
-              </TR>
-            </THead>
-            <TBody>
-              {batches.map((batch) => (
-                <TR key={batch.id}>
-                  <TD>{batch.batch_no || '—'}</TD>
-                  <TD>{batch.expiry_date || '—'}</TD>
-                  <TD>{batch.mrp}</TD>
-                  <TD>{batch.rate}</TD>
-                  <TD>{batch.qty ?? 0}</TD>
-                </TR>
-              ))}
-            </TBody>
-          </Table>
+          {itemDetails ? (
+            <div className="space-y-5">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-border bg-muted/20 px-4 py-3">
+                  <p className="text-xs text-muted">System Stock</p>
+                  <p className="text-lg font-semibold">{itemDetails.inventory.system_stock_qty}</p>
+                </div>
+                <div className="rounded-lg border border-border bg-muted/20 px-4 py-3">
+                  <p className="text-xs text-muted">Batch Stock</p>
+                  <p className="text-lg font-semibold">{itemDetails.inventory.batch_stock_qty}</p>
+                </div>
+                <div className="rounded-lg border border-border bg-muted/20 px-4 py-3">
+                  <p className="text-xs text-muted">Batches</p>
+                  <p className="text-lg font-semibold">{itemDetails.inventory.batches_count}</p>
+                </div>
+                <div className="rounded-lg border border-border bg-muted/20 px-4 py-3">
+                  <p className="text-xs text-muted">OCR Import Lines</p>
+                  <p className="text-lg font-semibold">{itemDetails.inventory.ocr_import_lines}</p>
+                </div>
+              </div>
+
+              <div>
+                <h4 className="mb-2 text-sm font-semibold">Batches</h4>
+                <Table>
+                  <THead>
+                    <TR>
+                      <TH>Batch</TH>
+                      <TH>Expiry</TH>
+                      <TH>MRP</TH>
+                      <TH>Qty</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {(itemDetails.batches || []).map((batch) => (
+                      <TR key={batch.id}>
+                        <TD>{batch.batch_no || '—'}</TD>
+                        <TD>{formatDate(batch.expiry_date)}</TD>
+                        <TD>{Number(batch.mrp || 0).toFixed(2)}</TD>
+                        <TD>{Number(batch.qty || 0)}</TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+                {!itemDetails.batches?.length && (
+                  <p className="mt-2 text-sm text-muted">No batches found for this item.</p>
+                )}
+              </div>
+
+              <div>
+                <h4 className="mb-2 text-sm font-semibold">Linked Sales/Purchase Orders</h4>
+                <Table>
+                  <THead>
+                    <TR>
+                      <TH>Date</TH>
+                      <TH>Type</TH>
+                      <TH>Invoice</TH>
+                      <TH>Party</TH>
+                      <TH>Qty</TH>
+                      <TH>Rate</TH>
+                      <TH>Line Total</TH>
+                      <TH>Source</TH>
+                      <TH>Action</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {(itemDetails.linked_orders || []).map((row) => (
+                      <TR key={`${row.order_id}-${row.order_date}-${row.qty}`}>
+                        <TD>{formatDate(row.order_date)}</TD>
+                        <TD className="capitalize">{row.order_type}</TD>
+                        <TD>{row.invoice_no || row.order_id}</TD>
+                        <TD>{row.party_name || '—'}</TD>
+                        <TD>{row.qty}</TD>
+                        <TD>{row.rate.toFixed(2)}</TD>
+                        <TD>{row.line_total.toFixed(2)}</TD>
+                        <TD>{row.source === 'ocr_import' ? 'OCR Import' : 'Manual'}</TD>
+                        <TD>
+                          <Button type="button" variant="ghost" onClick={() => navigate(`/orders/${row.order_id}/edit`)}>
+                            Open
+                          </Button>
+                        </TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+                {!itemDetails.linked_orders?.length && (
+                  <p className="mt-2 text-sm text-muted">No linked orders for this item yet.</p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-muted">Select an item to view inventory and linked order details.</p>
+          )}
         </CardContent>
       </Card>
     </div>
