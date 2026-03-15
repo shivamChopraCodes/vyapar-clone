@@ -4,18 +4,19 @@
   "private": true,
   "main": "src/main/main.js",
   "scripts": {
-    "dev": "VYAPAR_DB_PATH=\"/Users/shivam/Downloads/vyapar_db__t_2024_02_17_22_38_47_hy7m2.sql\" concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "dev": "VYAPAR_DB_PATH=\"/Users/shivam/Downloads/vyapar_backup_20260314_232557.db\" concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "build": "vite build",
     "start": "npm run dev",
     "postinstall": "electron-rebuild"
   },
   "dependencies": {
+    "@google/genai": "^1.43.0",
     "better-sqlite3": "^11.1.0",
     "electron": "^30.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "tesseract.js": "^5.1.1",
-    "react-router-dom": "^6.27.0"
+    "react-router-dom": "^6.27.0",
+    "tesseract.js": "^5.1.1"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.3",
