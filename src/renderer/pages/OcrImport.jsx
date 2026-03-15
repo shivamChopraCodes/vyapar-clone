@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
 import Label from '../components/ui/Label';
@@ -25,6 +25,12 @@ const confidenceClass = (value) => {
 
 export default function OcrImport() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const defaultType = useMemo(() => {
+    const params = new URLSearchParams(location.search || '');
+    const raw = String(params.get('type') || '').toLowerCase().trim();
+    return raw === 'sale' || raw === 'purchase' ? raw : '';
+  }, [location.search]);
   const [step, setStep] = useState(STEP_UPLOAD);
   const [engine, setEngine] = useState('tesseract');
   const [apiKey, setApiKey] = useState('');
@@ -34,6 +40,7 @@ export default function OcrImport() {
   const [processing, setProcessing] = useState(false);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState('');
+  const [manualJson, setManualJson] = useState('');
   const [ocrResult, setOcrResult] = useState(null);
   const [matchResult, setMatchResult] = useState(null);
   const [parties, setParties] = useState([]);
@@ -94,18 +101,24 @@ export default function OcrImport() {
   const initializeDrafts = (parsed, matched) => {
     const partyMatch = matched?.party_match || {};
     const suggestedParty = partyMatch?.matched?.id ? String(partyMatch.matched.id) : '';
+    const resolvedType = parsed?.type || defaultType || 'purchase';
+    const targetParty =
+      resolvedType === 'sale'
+        ? parsed?.buyer || parsed?.customer || parsed?.party || {}
+        : parsed?.supplier || parsed?.seller || parsed?.party || parsed?.buyer || {};
     setSupplierDraft({
       party_id: suggestedParty,
       create_new: !suggestedParty,
-      name: parsed?.supplier?.name || '',
-      phone: parsed?.supplier?.phone || '',
-      gst_number: parsed?.supplier?.gst_number || '',
-      address: parsed?.supplier?.address || '',
+      name: targetParty.name || '',
+      phone: targetParty.phone || '',
+      gst_number: targetParty.gst_number || '',
+      address: targetParty.address || '',
       state_of_supply: ''
     });
     setBillDraft({
-      invoice_no: parsed?.bill?.invoice_no || '',
-      order_date: parsed?.bill?.order_date || new Date().toISOString().slice(0, 10)
+      invoice_no: parsed?.bill?.invoice_no || parsed?.invoice_no || '',
+      order_date:
+        parsed?.bill?.order_date || parsed?.order_date || new Date().toISOString().slice(0, 10)
     });
     setItemDrafts(
       (matched?.item_matches || []).map((match, index) => {
@@ -144,6 +157,32 @@ export default function OcrImport() {
   };
 
   const processInvoice = async () => {
+    if (engine === 'manual') {
+      if (!manualJson.trim()) {
+        setError('Please paste JSON data.');
+        return;
+      }
+      setProcessing(true);
+      setError('');
+      try {
+        const parsed = JSON.parse(manualJson);
+        const normalized = {
+          ...parsed,
+          type: defaultType || parsed.type || 'purchase'
+        };
+        const matched = await window.vyapar.matchInvoiceEntities(normalized);
+        setOcrResult({ parsed: normalized, rawText: manualJson });
+        setMatchResult(matched);
+        initializeDrafts(normalized, matched);
+        setStep(STEP_REVIEW);
+      } catch (err) {
+        setError(err?.message || 'Invalid JSON format.');
+      } finally {
+        setProcessing(false);
+      }
+      return;
+    }
+
     if (!filePath) {
       setError('Select a file first. In Electron, file path access is required for OCR.');
       return;
@@ -155,10 +194,14 @@ export default function OcrImport() {
         await window.vyapar.setOcrApiKey(apiKey);
       }
       const processed = await window.vyapar.processInvoiceImage(filePath, engine);
-      const matched = await window.vyapar.matchInvoiceEntities(processed.parsed);
-      setOcrResult(processed);
+      const normalized = {
+        ...processed.parsed,
+        type: defaultType || processed.parsed?.type || 'purchase'
+      };
+      const matched = await window.vyapar.matchInvoiceEntities(normalized);
+      setOcrResult({ ...processed, parsed: normalized });
       setMatchResult(matched);
-      initializeDrafts(processed.parsed, matched);
+      initializeDrafts(normalized, matched);
       setStep(STEP_REVIEW);
     } catch (err) {
       setError(err?.message || 'Failed to process invoice.');
@@ -200,40 +243,71 @@ export default function OcrImport() {
     setImporting(true);
     setError('');
     try {
+      const parsedPartyId = supplierDraft.party_id ? Number(supplierDraft.party_id) : null;
+      const finalPartyId = supplierDraft.create_new ? null : (Number.isNaN(parsedPartyId) ? null : parsedPartyId);
+      
+      const importType = ocrResult?.parsed?.type || defaultType || 'purchase';
       const payload = {
-        party_id: supplierDraft.create_new ? null : Number(supplierDraft.party_id || 0),
-        supplier: {
-          id: supplierDraft.create_new ? null : Number(supplierDraft.party_id || 0),
-          name: supplierDraft.name || '',
-          phone: supplierDraft.phone || '',
-          gst_number: supplierDraft.gst_number || '',
-          address: supplierDraft.address || '',
-          state_of_supply: supplierDraft.state_of_supply || ''
-        },
+        party_id: finalPartyId,
+      ...(importType === 'sale'
+        ? {
+            buyer: {
+              id: finalPartyId,
+              name: supplierDraft.name || '',
+              phone: supplierDraft.phone || '',
+              gst_number: supplierDraft.gst_number || '',
+              address: supplierDraft.address || '',
+              state_of_supply: supplierDraft.state_of_supply || ''
+            }
+          }
+        : {
+            supplier: {
+              id: finalPartyId,
+              name: supplierDraft.name || '',
+              phone: supplierDraft.phone || '',
+              gst_number: supplierDraft.gst_number || '',
+              address: supplierDraft.address || '',
+              state_of_supply: supplierDraft.state_of_supply || ''
+            }
+          }),
         bill: {
           invoice_no: billDraft.invoice_no || '',
           order_date: billDraft.order_date || '',
           notes: `OCR import from ${fileName}`
         },
-        items: itemDrafts.map((row) => ({
-          item_id: row.selected_item_id ? Number(row.selected_item_id) : null,
-          item_name: row.item_name || '',
-          hsn: row.hsn || '',
-          qty: toNumber(row.qty),
-          rate: toNumber(row.rate),
-          amount: toNumber(row.amount),
-          batch_no: row.batch_no || '',
-          expiry_date: row.expiry_date || '',
-          mrp: row.mrp === '' ? null : toNumber(row.mrp),
-          gst_rate: toNumber(row.gst_rate),
-          pack: row.pack || '',
-          discount_pct: toNumber(row.discount_pct)
-        }))
+        items: itemDrafts.map((row) => {
+          const parsedItemId = row.selected_item_id ? Number(row.selected_item_id) : null;
+          const finalItemId = Number.isNaN(parsedItemId) ? null : parsedItemId;
+          const qty = toNumber(row.qty);
+          const rawRate = toNumber(row.rate);
+          const discountPct = toNumber(row.discount_pct);
+          const effectiveRate =
+            discountPct > 0 ? Number((rawRate * (1 - discountPct / 100)).toFixed(2)) : rawRate;
+          const amount =
+            discountPct > 0 && qty > 0 ? Number((qty * effectiveRate).toFixed(2)) : toNumber(row.amount);
+          return {
+            item_id: finalItemId,
+            item_name: row.item_name || '',
+            hsn: row.hsn || '',
+            qty,
+            rate: effectiveRate,
+            amount,
+            batch_no: row.batch_no || '',
+            expiry_date: row.expiry_date || '',
+            mrp: row.mrp === '' ? null : toNumber(row.mrp),
+            gst_rate: toNumber(row.gst_rate),
+            pack: row.pack || '',
+            discount_pct: discountPct
+          };
+        })
       };
-      const result = await window.vyapar.importPurchaseBillOcr(payload);
-      const orderId = result?.order?.id;
-      if (orderId) navigate(`/orders/${orderId}/edit`);
-      else navigate('/purchase');
+      let result;
+      if (importType === 'sale') {
+        result = await window.vyapar.importSaleBillOcr(payload);
+      } else {
+        result = await window.vyapar.importPurchaseBillOcr(payload);
+      }
+      navigate(importType === 'sale' ? '/sales' : '/purchase');
     } catch (err) {
       setError(err?.message || 'Import failed.');
     } finally {
@@ -254,9 +328,18 @@ export default function OcrImport() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="section-title text-3xl font-semibold">Import Purchase Invoice (OCR)</h2>
-        <Button type="button" variant="outline" onClick={() => navigate('/purchase')}>
-          Back to Purchase
+        <h2 className="section-title text-3xl font-semibold">
+          Import {(ocrResult?.parsed?.type || defaultType || 'purchase') === 'sale' ? 'Sale' : 'Purchase'} Invoice
+          (OCR)
+        </h2>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() =>
+            navigate((ocrResult?.parsed?.type || defaultType || 'purchase') === 'sale' ? '/sales' : '/purchase')
+          }
+        >
+          Back to {(ocrResult?.parsed?.type || defaultType || 'purchase') === 'sale' ? 'Sales' : 'Purchase'}
         </Button>
       </div>
 
@@ -286,6 +369,8 @@ export default function OcrImport() {
                 >
                   <option value="tesseract">Tesseract (Local)</option>
                   <option value="google">Google Vision (Cloud)</option>
+                  <option value="gemini">Gemini AI (Cloud)</option>
+                  <option value="manual">Manual JSON Input</option>
                 </select>
               </div>
               {engine === 'google' && (
@@ -301,11 +386,23 @@ export default function OcrImport() {
               )}
             </div>
 
-            <div className="ocr-dropzone">
-              <Label>Invoice Image or PDF</Label>
-              <Input type="file" accept=".pdf,image/*" onChange={onFileChange} />
-              {fileName ? <p className="text-sm text-muted">Selected: {fileName}</p> : null}
-            </div>
+            {engine === 'manual' ? (
+              <div className="space-y-2">
+                <Label>Paste OCR JSON</Label>
+                <textarea
+                  className="w-full h-48 rounded-lg border border-border px-3 py-2 text-sm font-mono"
+                  placeholder='{"type": "purchase", "supplier": {...}, "bill": {...}, "items": [...]}'
+                  value={manualJson}
+                  onChange={(e) => setManualJson(e.target.value)}
+                />
+              </div>
+            ) : (
+              <div className="ocr-dropzone">
+                <Label>Invoice Image or PDF</Label>
+                <Input type="file" accept=".pdf,image/*" onChange={onFileChange} />
+                {fileName ? <p className="text-sm text-muted">Selected: {fileName}</p> : null}
+              </div>
+            )}
 
             {previewUrl ? (
               <div className="ocr-preview-box">
@@ -412,8 +509,9 @@ export default function OcrImport() {
               <CardTitle>Items Review</CardTitle>
             </CardHeader>
             <CardContent>
-              <Table className="ocr-table">
-                <THead>
+              <div className="w-full overflow-x-auto">
+                <Table className="ocr-table whitespace-nowrap">
+                  <THead>
                   <TR>
                     <TH>OCR Item</TH>
                     <TH>Match</TH>
@@ -487,6 +585,7 @@ export default function OcrImport() {
                   ))}
                 </TBody>
               </Table>
+              </div>
             </CardContent>
           </Card>
 
@@ -526,12 +625,46 @@ export default function OcrImport() {
               </div>
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="mt-4 w-full overflow-x-auto">
+              <Table className="ocr-table min-w-[600px] whitespace-nowrap">
+                <THead>
+                  <TR>
+                    <TH>Item Name</TH>
+                    <TH>Match / Action</TH>
+                    <TH>Qty</TH>
+                    <TH>Rate</TH>
+                    <TH>Amount</TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {itemDrafts.map((row, index) => (
+                    <TR key={row.key}>
+                      <TD>{row.item_name}</TD>
+                      <TD>
+                        <SearchableSelect
+                          value={row.selected_item_id}
+                          options={itemOptions}
+                          onChange={(next) => updateItemDraft(index, 'selected_item_id', String(next || ''))}
+                          placeholder="Match or create"
+                        />
+                      </TD>
+                      <TD>{row.qty}</TD>
+                      <TD>{row.rate}</TD>
+                      <TD>{row.amount}</TD>
+                    </TR>
+                  ))}
+                </TBody>
+              </Table>
+            </div>
+
+            <div className="flex items-center gap-3 pt-4">
               <Button type="button" variant="outline" onClick={() => setStep(STEP_REVIEW)} disabled={importing}>
                 Back
               </Button>
               <Button type="button" onClick={importInvoice} disabled={importing}>
-                {importing ? 'Importing...' : 'Import Purchase Bill'}
+                {importing
+                  ? 'Importing...'
+                  : `Import ${ocrResult?.parsed?.type === 'sale' ? 'Sale' : 'Purchase'} Bill`}
               </Button>
             </div>
           </CardContent>

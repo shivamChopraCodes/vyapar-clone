@@ -9,6 +9,7 @@ import Reports from './pages/Reports';
 import Orders from './pages/Orders';
 import OrderEdit from './pages/OrderEdit';
 import OcrImport from './pages/OcrImport';
+import GeminiPage from './pages/GeminiPage';
 
 export default function App() {
   return (
@@ -21,6 +22,7 @@ export default function App() {
           <Route path="/parties" element={<Parties />} />
           <Route path="/items" element={<Items />} />
           <Route path="/reports" element={<Reports />} />
+          <Route path="/ai/gemini" element={<GeminiPage />} />
           <Route path="/sales" element={<Orders mode="sale" />} />
           <Route path="/sales/new" element={<OrderEdit forcedOrderType="sale" />} />
           <Route path="/purchase" element={<Orders mode="purchase" />} />

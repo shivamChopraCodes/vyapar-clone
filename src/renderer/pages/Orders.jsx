@@ -145,6 +145,20 @@ export default function Orders({ mode = 'sale' }) {
     setOrders(orderData);
   };
 
+  const deleteOrder = async (order) => {
+    if (!order) return;
+    const invoiceNo = getInvoiceNo(order) || order.id;
+    const confirmed = window.confirm(`Delete ${order.order_type} order ${invoiceNo}? This cannot be undone.`);
+    if (!confirmed) return;
+    try {
+      await window.vyapar.deleteOrder(order.id);
+      setSelectedOrderId(null);
+      await load();
+    } catch (error) {
+      window.alert(`Failed to delete order: ${error?.message || 'Unknown error'}`);
+    }
+  };
+
   useEffect(() => {
     load();
   }, []);
@@ -215,6 +229,11 @@ export default function Orders({ mode = 'sale' }) {
         return true;
       })
       .sort((a, b) => {
+        const dateA = normalizeDateForCompare(a.order_date);
+        const dateB = normalizeDateForCompare(b.order_date);
+        if (dateA && dateB && dateA.getTime() !== dateB.getTime()) return dateB - dateA;
+        if (dateA && !dateB) return -1;
+        if (!dateA && dateB) return 1;
         const byInvoice = getInvoiceNo(b).localeCompare(getInvoiceNo(a), undefined, {
           numeric: true,
           sensitivity: 'base'
@@ -273,11 +292,13 @@ export default function Orders({ mode = 'sale' }) {
           <h2 className="section-title text-3xl font-semibold">{pageTitle}</h2>
         </div>
         <div className="flex items-center gap-2">
-          {isPurchaseMode && (
-            <Button type="button" variant="outline" onClick={() => navigate('/orders/import-ocr')}>
-              Import from Invoice
-            </Button>
-          )}
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => navigate(`/orders/import-ocr?type=${isPurchaseMode ? 'purchase' : 'sale'}`)}
+          >
+            Import from Invoice
+          </Button>
           <Button type="button" onClick={() => navigate(createPath)}>
             {isPurchaseMode ? '+ Add Purchase' : '+ Add Sale'}
           </Button>
@@ -424,9 +445,14 @@ export default function Orders({ mode = 'sale' }) {
                       </span>
                     </TD>
                     <TD>
-                      <Button type="button" variant="ghost" onClick={() => navigate(`/orders/${order.id}/edit`)}>
-                        Edit
-                      </Button>
+                      <div className="flex gap-2">
+                        <Button type="button" variant="ghost" onClick={() => navigate(`/orders/${order.id}/edit`)}>
+                          Edit
+                        </Button>
+                        <Button type="button" variant="ghost" onClick={() => deleteOrder(order)}>
+                          Delete
+                        </Button>
+                      </div>
                     </TD>
                   </TR>
                 );

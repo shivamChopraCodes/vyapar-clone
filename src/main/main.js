@@ -6,6 +6,7 @@ const { execFile } = require('child_process');
 const db = require('./db');
 const { processInvoiceFile } = require('./ocrService');
 const { matchParty, matchItems } = require('./matchingService');
+const { getGeminiApiKey, setGeminiApiKey, generateGeminiResponse } = require('./geminiService');
 
 const isDev = !app.isPackaged;
 const OCR_SETTINGS_FILE = 'ocr-settings.json';
@@ -75,7 +76,9 @@ ipcMain.handle('taxCode:list', async () => db.listTaxCodes());
 ipcMain.handle('item:create', async (_event, payload) => db.upsertItem(payload));
 
 ipcMain.handle('batch:list', async (_event, itemId) => db.listBatches(itemId));
+ipcMain.handle('batch:availability', async (_event, itemId) => db.listBatchAvailability(itemId));
 ipcMain.handle('batch:create', async (_event, payload) => db.upsertBatch(payload));
+ipcMain.handle('db:export', async (_event, targetPath) => db.exportDatabase(targetPath));
 
 ipcMain.handle('partyRate:list', async (_event, partyId) => db.listPartyRates(partyId));
 ipcMain.handle('partyRate:forOrder', async (_event, partyId, orderType) =>
@@ -89,21 +92,98 @@ ipcMain.handle('order:get', async (_event, orderId) => db.getOrder(Number(orderI
 ipcMain.handle('order:items', async (_event, orderId) => db.listOrderItems(orderId));
 ipcMain.handle('order:create', async (_event, payload) => db.createOrder(payload));
 ipcMain.handle('order:update', async (_event, orderId, payload) => db.updateOrder(Number(orderId), payload));
+ipcMain.handle('order:delete', async (_event, orderId) => db.deleteOrder(Number(orderId)));
 ipcMain.handle('order:importPurchaseBillOcr', async (_event, payload) =>
   db.importPurchaseBillFromOcr(payload)
 );
+ipcMain.handle('order:importSaleBillOcr', async (_event, payload) =>
+  db.importSaleBillFromOcr(payload)
+);
 ipcMain.handle('ocr:processImage', async (_event, imagePath, engine = 'tesseract') => {
+  if (engine === 'gemini') {
+    const prompt = `You are an expert invoice data extractor. Extract the invoice details accurately from the provided image and return ONLY a valid JSON object matching exactly this structure with no markdown formatting or extra text:
+{
+  "seller": { "name": "", "phone": "", "gst_number": "", "address": "" },
+  "buyer": { "name": "", "phone": "", "gst_number": "", "address": "" },
+  "invoice_no": "",
+  "order_date": "YYYY-MM-DD",
+  "items": [
+    { "item_name": "", "hsn": "", "qty": 0, "rate": 0, "amount": 0, "batch_no": "", "expiry_date": "YYYY-MM-DD", "mrp": 0, "gst_rate": 0, "pack": "", "discount_pct": 0 }
+  ]
+}`;
+    const result = await generateGeminiResponse({ prompt, imagePath, model: 'gemini-2.5-flash' });
+    let rawText = result.text;
+    rawText = rawText.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
+    
+    let extracted;
+    try {
+      extracted = JSON.parse(rawText);
+    } catch (e) {
+      throw new Error('Gemini did not return valid JSON: ' + rawText);
+    }
+    
+    const companies = db.listCompanies();
+    let isPurchase = true; 
+    
+    if (companies && companies.length > 0) {
+      const buyerGst = (extracted.buyer?.gst_number || '').replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+      const buyerName = (extracted.buyer?.name || '').toLowerCase().trim();
+      
+      const matchedCompany = companies.find(c => {
+        const cst = (c.gst_number || '').replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+        const cname = (c.name || '').toLowerCase().trim();
+        if (buyerGst && cst && buyerGst === cst) return true;
+        if (buyerName && cname && cname.length > 3 && (buyerName.includes(cname) || cname.includes(buyerName))) return true;
+        return false;
+      });
+      
+      if (!matchedCompany) {
+        const sellerGst = (extracted.seller?.gst_number || '').replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+        const sellerName = (extracted.seller?.name || '').toLowerCase().trim();
+        const matchedSeller = companies.find(c => {
+          const cst = (c.gst_number || '').replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+          const cname = (c.name || '').toLowerCase().trim();
+          if (sellerGst && cst && sellerGst === cst) return true;
+          if (sellerName && cname && cname.length > 3 && (sellerName.includes(cname) || cname.includes(sellerName))) return true;
+          return false;
+        });
+        
+        if (matchedSeller) {
+          isPurchase = false;
+        }
+      }
+    }
+    
+    const parsed = {
+      type: isPurchase ? 'purchase' : 'sale',
+      supplier: isPurchase ? extracted.seller : extracted.buyer,
+      bill: {
+        invoice_no: extracted.invoice_no || '',
+        order_date: extracted.order_date || ''
+      },
+      items: extracted.items || []
+    };
+    
+    return { rawText, parsed };
+  }
+
   const settings = readOcrSettings();
-  return processInvoiceFile(String(imagePath || '').trim(), String(engine || 'tesseract').toLowerCase(), {
+  const res = await processInvoiceFile(String(imagePath || '').trim(), String(engine || 'tesseract').toLowerCase(), {
     apiKey: settings.googleVisionApiKey || ''
   });
+  
+  if (res && res.parsed) {
+    res.parsed.type = 'purchase';
+  }
+  return res;
 });
 ipcMain.handle('ocr:matchEntities', async (_event, ocrData) => {
   const parsed = ocrData?.parsed || ocrData || {};
+  const targetParty = parsed?.supplier || parsed?.seller || parsed?.buyer || {};
   const parties = db.listParties();
   const items = db.listItems();
   return {
-    party_match: matchParty(parsed?.supplier || {}, parties),
+    party_match: matchParty(targetParty, parties),
     item_matches: matchItems(parsed?.items || [], items),
     db_snapshot: {
       parties_count: parties.length,
@@ -121,6 +201,9 @@ ipcMain.handle('ocr:getApiKey', async () => {
   const settings = readOcrSettings();
   return String(settings.googleVisionApiKey || '');
 });
+ipcMain.handle('gemini:getApiKey', async () => getGeminiApiKey());
+ipcMain.handle('gemini:setApiKey', async (_event, key = '') => setGeminiApiKey(key));
+ipcMain.handle('gemini:generate', async (_event, payload) => generateGeminiResponse(payload || {}));
 ipcMain.handle('debug:dbInfo', async () => db.getDbInfo());
 ipcMain.handle('debug:orders', async () => db.getOrdersDiagnostics());
 

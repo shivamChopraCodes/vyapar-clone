@@ -43,7 +43,6 @@ export default function OrderEdit({ forcedOrderType = null }) {
   const { orderId } = useParams();
   const isEditMode = Boolean(orderId);
   const forcedType = forcedOrderType === 'purchase' ? 'purchase' : forcedOrderType === 'sale' ? 'sale' : null;
-  const listPath = forcedType === 'purchase' ? '/purchase' : '/sales';
   const [loading, setLoading] = useState(true);
   const [orderType, setOrderType] = useState(forcedType || 'sale');
   const [partyId, setPartyId] = useState('');
@@ -61,6 +60,9 @@ export default function OrderEdit({ forcedOrderType = null }) {
   const [orderItems, setOrderItems] = useState([]);
   const [lineForm, setLineForm] = useState(emptyLine);
   const [company, setCompany] = useState(null);
+  const [batchOptionsByItemId, setBatchOptionsByItemId] = useState({});
+  const effectiveOrderType = forcedType || orderType;
+  const listPath = effectiveOrderType === 'purchase' ? '/purchase' : '/sales';
 
   const load = async () => {
     setLoading(true);
@@ -135,7 +137,6 @@ export default function OrderEdit({ forcedOrderType = null }) {
     }
   }, [forcedType, isEditMode]);
 
-  const effectiveOrderType = forcedType || orderType;
 
   useEffect(() => {
     let cancelled = false;
@@ -321,7 +322,9 @@ export default function OrderEdit({ forcedOrderType = null }) {
     } else {
       await window.vyapar.createOrder(payload);
     }
-    navigate(listPath);
+    const targetType = isEditMode ? orderType : effectiveOrderType;
+    const targetListPath = targetType === 'purchase' ? '/purchase' : '/sales';
+    navigate(targetListPath);
   };
 
   const totals = useMemo(() => {
@@ -346,6 +349,33 @@ export default function OrderEdit({ forcedOrderType = null }) {
       setBalanceAmount(totals.invoiceTotal.toFixed(2));
     }
   }, [useWholeAmountAsBalance, totals.invoiceTotal]);
+
+  useEffect(() => {
+    const ids = new Set();
+    if (lineForm.item_id) ids.add(String(lineForm.item_id));
+    orderItems.forEach((line) => {
+      if (line.item_id) ids.add(String(line.item_id));
+    });
+    const missing = [...ids].filter((id) => id && !batchOptionsByItemId[id]);
+    if (!missing.length) return;
+    let active = true;
+    (async () => {
+      const entries = await Promise.all(
+        missing.map(async (id) => [id, await window.vyapar.listBatchAvailability(Number(id))])
+      );
+      if (!active) return;
+      setBatchOptionsByItemId((prev) => {
+        const next = { ...prev };
+        entries.forEach(([id, data]) => {
+          next[id] = data || [];
+        });
+        return next;
+      });
+    })();
+    return () => {
+      active = false;
+    };
+  }, [lineForm.item_id, orderItems, batchOptionsByItemId]);
 
   const numericBalanceAmount = Number.isFinite(Number(balanceAmount)) ? Number(balanceAmount) : 0;
   const remainingBalance = Math.max(totals.invoiceTotal - numericBalanceAmount, 0);
@@ -393,6 +423,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
       })),
     [gstRates, gstLabelByRate]
   );
+  const lineFormBatchOptions = batchOptionsByItemId[String(lineForm.item_id || '')] || [];
 
   const selectedParty = useMemo(
     () => parties.find((p) => String(p.id) === partyId) || null,
@@ -542,7 +573,21 @@ export default function OrderEdit({ forcedOrderType = null }) {
             </div>
             <div>
               <Label>Batch</Label>
-              <Input value={lineForm.batch_no} onChange={updateLineForm('batch_no')} placeholder="BATCH-01" />
+              <Input
+                list={`batch-options-${lineForm.item_id || 'new'}`}
+                value={lineForm.batch_no}
+                onChange={updateLineForm('batch_no')}
+                placeholder="BATCH-01"
+              />
+              <datalist id={`batch-options-${lineForm.item_id || 'new'}`}>
+                {lineFormBatchOptions.map((batch) => (
+                  <option
+                    key={batch.batch_no}
+                    value={batch.batch_no}
+                    label={`Qty: ${Number(batch.available_qty || 0)}`}
+                  />
+                ))}
+              </datalist>
             </div>
             <div>
               <Label>Expiry</Label>
@@ -616,7 +661,20 @@ export default function OrderEdit({ forcedOrderType = null }) {
                       <TD>{itemMap.get(String(line.item_id))?.name || 'Item'}</TD>
                       <TD>{line.hsn || itemMap.get(String(line.item_id))?.hsn || '—'}</TD>
                       <TD>
-                        <Input value={line.batch_no || ''} onChange={updateExistingLine(index, 'batch_no')} />
+                        <Input
+                          list={`batch-options-${line.item_id}-${index}`}
+                          value={line.batch_no || ''}
+                          onChange={updateExistingLine(index, 'batch_no')}
+                        />
+                        <datalist id={`batch-options-${line.item_id}-${index}`}>
+                          {(batchOptionsByItemId[String(line.item_id || '')] || []).map((batch) => (
+                            <option
+                              key={batch.batch_no}
+                              value={batch.batch_no}
+                              label={`Qty: ${Number(batch.available_qty || 0)}`}
+                            />
+                          ))}
+                        </datalist>
                       </TD>
                       <TD>
                         <Input value={line.expiry_date || ''} onChange={updateExistingLine(index, 'expiry_date')} />

@@ -7,6 +7,7 @@ const links = [
   { to: '/parties', label: 'Parties' },
   { to: '/items', label: 'Items & Batches' },
   { to: '/reports', label: 'Reports' },
+  { to: '/ai/gemini', label: 'Gemini API' },
   { to: '/sales', label: 'Sales Orders' },
   { to: '/purchase', label: 'Purchase Orders' }
 ];
