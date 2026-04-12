@@ -13,14 +13,24 @@ body {
 }
 
 .app-shell {
-  min-height: 100vh;
+  height: 100vh;
   display: grid;
   grid-template-columns: 260px 1fr;
+  overflow: hidden;
 }
 
 .sidebar {
   background: linear-gradient(140deg, #f6f5f2 0%, #e8ecef 55%, #f6f5f2 100%);
   border-right: 1px solid #dedad3;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+
+.app-main {
+  height: 100vh;
+  overflow-y: auto;
 }
 
 .glass {

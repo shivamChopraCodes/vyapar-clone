@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 export default function SearchableSelect({
   value,
@@ -11,6 +12,8 @@ export default function SearchableSelect({
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
   const closeTimerRef = useRef(null);
+  const containerRef = useRef(null);
+  const [menuStyle, setMenuStyle] = useState(null);
 
   const selectedLabel = useMemo(() => {
     const match = options.find((option) => String(option.value) === String(value));
@@ -27,6 +30,30 @@ export default function SearchableSelect({
     };
   }, []);
 
+  useEffect(() => {
+    if (!open || disabled) return undefined;
+
+    const updateMenuPosition = () => {
+      const container = containerRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      setMenuStyle({
+        top: rect.bottom + 4,
+        left: rect.left,
+        width: rect.width
+      });
+    };
+
+    updateMenuPosition();
+    window.addEventListener('resize', updateMenuPosition);
+    window.addEventListener('scroll', updateMenuPosition, true);
+
+    return () => {
+      window.removeEventListener('resize', updateMenuPosition);
+      window.removeEventListener('scroll', updateMenuPosition, true);
+    };
+  }, [open, disabled]);
+
   const filteredOptions = useMemo(() => {
     const text = query.trim().toLowerCase();
     if (!text) return options;
@@ -40,7 +67,7 @@ export default function SearchableSelect({
   };
 
   return (
-    <div className={`relative ${className}`}>
+    <div ref={containerRef} className={`relative ${className}`}>
       <input
         className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accentSoft disabled:cursor-not-allowed disabled:bg-muted/40"
         value={query}
@@ -69,8 +96,12 @@ export default function SearchableSelect({
         }}
       />
 
-      {open && !disabled && (
-        <div className="absolute z-20 mt-1 max-h-56 w-full overflow-auto rounded-lg border border-border bg-white shadow-lg">
+      {open && !disabled && menuStyle
+        ? createPortal(
+        <div
+          className="fixed z-[1000] max-h-56 overflow-auto rounded-lg border border-border bg-white shadow-lg"
+          style={menuStyle}
+        >
           {filteredOptions.length ? (
             filteredOptions.map((option) => (
               <button
@@ -86,8 +117,10 @@ export default function SearchableSelect({
           ) : (
             <p className="px-3 py-2 text-sm text-muted">No matches</p>
           )}
-        </div>
-      )}
+        </div>,
+        document.body
+      )
+        : null}
     </div>
   );
 }

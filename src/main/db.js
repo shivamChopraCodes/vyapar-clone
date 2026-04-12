@@ -470,6 +470,28 @@ function upsertParty(data) {
   };
 }
 
+function updateParty(id, data) {
+  const db = getDb();
+  const partyId = Number(id);
+  if (!Number.isFinite(partyId) || partyId <= 0) throw new Error('Invalid party id.');
+  db.prepare(
+    `UPDATE kb_names
+     SET full_name = @name,
+         phone_number = @phone,
+         address = @address,
+         name_gstin_number = @gst_number,
+         name_state = @state_of_supply
+     WHERE name_id = @id`
+  ).run({ id: partyId, ...data });
+  return db
+    .prepare(
+      `SELECT name_id as id, full_name as name, phone_number as phone, address,
+              name_gstin_number as gst_number, name_state as state_of_supply
+       FROM kb_names WHERE name_id = ?`
+    )
+    .get(partyId);
+}
+
 function listItems() {
   return getDb()
     .prepare(
@@ -620,33 +642,55 @@ function listTaxCodes() {
 
 function upsertItem(data) {
   const db = getDb();
+  const hasItemCategoryTable = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kb_item_categories' LIMIT 1")
+    .get();
+  const findAnyCategoryId = hasItemCategoryTable
+    ? db.prepare('SELECT item_category_id FROM kb_item_categories ORDER BY item_category_id ASC LIMIT 1')
+    : null;
+  const findCategoryByName = hasItemCategoryTable
+    ? db.prepare('SELECT item_category_id FROM kb_item_categories WHERE item_category_name = ? LIMIT 1')
+    : null;
+  const insertCategory = hasItemCategoryTable
+    ? db.prepare('INSERT OR IGNORE INTO kb_item_categories (item_category_name) VALUES (?)')
+    : null;
+  const resolveCategoryId = () => {
+    if (!hasItemCategoryTable) return null;
+    const existing = findAnyCategoryId.get();
+    if (existing) return existing.item_category_id;
+    const name = 'General';
+    insertCategory.run(name);
+    const created = findCategoryByName.get(name);
+    return created ? created.item_category_id : null;
+  };
+
   let taxId = null;
   if (data.gst_rate && Number(data.gst_rate) > 0) {
-    const existing = db
-      .prepare('SELECT tax_code_id FROM kb_tax_code WHERE tax_rate = ? LIMIT 1')
-      .get(Number(data.gst_rate));
-    if (existing) {
-      taxId = existing.tax_code_id;
-    } else {
-      const info = db
-        .prepare(
-          `INSERT INTO kb_tax_code (tax_code_name, tax_rate)
-           VALUES (@name, @rate)`
-        )
-        .run({ name: `GST@${Number(data.gst_rate)}%`, rate: Number(data.gst_rate) });
-      taxId = info.lastInsertRowid;
-    }
+    taxId = resolveTaxCodeIdByRate(db, Number(data.gst_rate), false);
   }
 
+  const categoryId = resolveCategoryId();
+  const validCategoryId =
+    categoryId !== null && categoryId !== undefined
+      ? db.prepare('SELECT item_category_id FROM kb_item_categories WHERE item_category_id = ?').get(categoryId)
+      : null;
   const stmt = db.prepare(
-    `INSERT INTO kb_items (item_name, item_hsn_sac_code, item_sale_unit_price, item_purchase_unit_price, item_tax_id)
-     VALUES (@name, @hsn, @base_rate, @base_rate, @tax_id)`
+    `INSERT INTO kb_items (
+        item_name,
+        item_hsn_sac_code,
+        item_sale_unit_price,
+        item_purchase_unit_price,
+        item_tax_id,
+        category_id
+     )
+     VALUES (@name, @hsn, @base_rate, @base_rate, @tax_id, @category_id)`
   );
   const info = stmt.run({
     name: data.name,
     hsn: data.hsn || '',
     base_rate: Number(data.base_rate || 0),
-    tax_id: taxId
+    tax_id: taxId,
+    category_id: validCategoryId ? categoryId : null
   });
   return db
     .prepare(
@@ -663,6 +707,70 @@ function upsertItem(data) {
        WHERE i.item_id = ?`
     )
     .get(info.lastInsertRowid);
+}
+
+function updateItem(id, data) {
+  const db = getDb();
+  const itemId = Number(id);
+  if (!Number.isFinite(itemId) || itemId <= 0) throw new Error('Invalid item id.');
+  let taxId = null;
+  if (data.gst_rate && Number(data.gst_rate) > 0) {
+    taxId = resolveTaxCodeIdByRate(db, Number(data.gst_rate), false);
+  }
+  db.prepare(
+    `UPDATE kb_items
+     SET item_name = @name,
+         item_hsn_sac_code = @hsn,
+         item_sale_unit_price = @base_rate,
+         item_purchase_unit_price = @base_rate,
+         item_tax_id = @tax_id,
+         item_date_modified = CURRENT_TIMESTAMP
+     WHERE item_id = @id`
+  ).run({ id: itemId, name: data.name, hsn: data.hsn || '', base_rate: Number(data.base_rate || 0), tax_id: taxId });
+  return db
+    .prepare(
+      `SELECT i.item_id as id, i.item_name as name, i.item_hsn_sac_code as hsn,
+              COALESCE(t.tax_rate, 0) as gst_rate,
+              COALESCE(i.item_sale_unit_price, i.item_purchase_unit_price, 0) as base_rate,
+              COALESCE(u.unit_short_name, u.unit_name, '') as base_unit
+       FROM kb_items i
+       LEFT JOIN kb_tax_code t ON t.tax_code_id = i.item_tax_id
+       LEFT JOIN kb_item_units u ON u.unit_id = i.base_unit_id
+       WHERE i.item_id = ?`
+    )
+    .get(itemId);
+}
+
+function updateItemName(itemId, name) {
+  const db = getDb();
+  const id = Number(itemId);
+  if (!Number.isFinite(id) || id <= 0) {
+    throw new Error('Invalid item id');
+  }
+  const trimmed = String(name || '').trim();
+  if (!trimmed) {
+    throw new Error('Item name is required');
+  }
+  db.prepare('UPDATE kb_items SET item_name = ?, item_date_modified = CURRENT_TIMESTAMP WHERE item_id = ?').run(
+    trimmed,
+    id
+  );
+  return db
+    .prepare(
+      `SELECT i.item_id as id,
+              i.item_name as name,
+              i.item_hsn_sac_code as hsn,
+              COALESCE(t.tax_rate, 0) as gst_rate,
+              COALESCE(i.item_sale_unit_price, i.item_purchase_unit_price, 0) as base_rate,
+              COALESCE(i.item_stock_quantity, 0) as stock_qty,
+              i.base_unit_id,
+              COALESCE(u.unit_short_name, u.unit_name, '') as base_unit
+       FROM kb_items i
+       LEFT JOIN kb_tax_code t ON t.tax_code_id = i.item_tax_id
+       LEFT JOIN kb_item_units u ON u.unit_id = i.base_unit_id
+       WHERE i.item_id = ?`
+    )
+    .get(id);
 }
 
 function listBatches(itemId) {
@@ -817,8 +925,26 @@ function normalizeDateValue(value) {
   return String(value).trim() || null;
 }
 
+function normalizeExpiryMonthValue(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const raw = String(value).trim();
+  const isoMatch = raw.match(/^(\d{4})-(\d{2})(?:-(\d{2}))?/);
+  if (isoMatch) return `${isoMatch[1]}-${isoMatch[2]}-01`;
+  const slashMonthMatch = raw.match(/^(\d{2})\/(\d{4})$/);
+  if (slashMonthMatch) return `${slashMonthMatch[2]}-${slashMonthMatch[1]}-01`;
+  const normalizedDate = normalizeDateValue(raw);
+  if (!normalizedDate) return null;
+  const normalizedMatch = String(normalizedDate).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!normalizedMatch) return null;
+  return `${normalizedMatch[1]}-${normalizedMatch[2]}-01`;
+}
+
 function normalizeBatchValue(value) {
   return value === undefined || value === null ? '' : String(value).trim();
+}
+
+function normalizeAmountBasis(value) {
+  return String(value || '').toLowerCase() === 'post_tax' ? 'post_tax' : 'pre_tax';
 }
 
 function upsertBatch(data) {
@@ -826,7 +952,7 @@ function upsertBatch(data) {
   const itemId = Number(data.item_id);
   const qty = Number(data.qty || 0);
   const batchNo = normalizeBatchValue(data.batch_no);
-  const expiryDate = normalizeDateValue(data.expiry_date);
+  const expiryDate = normalizeExpiryMonthValue(data.expiry_date);
   const mrp =
     data.mrp !== undefined && data.mrp !== null && data.mrp !== ''
       ? Number(data.mrp)
@@ -925,7 +1051,7 @@ function buildStockAdjusters(db) {
     const itemId = Number(line.item_id);
     if (!Number.isFinite(itemId) || itemId <= 0) return null;
     const batchNo = normalizeBatchValue(line.batch_no);
-    const expiryDate = normalizeDateValue(line.expiry_date);
+    const expiryDate = normalizeExpiryMonthValue(line.expiry_date);
     const mrp =
       line.mrp !== undefined && line.mrp !== null && line.mrp !== '' ? Number(line.mrp) : null;
     const existing = findIstByLine.get({
@@ -1137,7 +1263,7 @@ function listOrders() {
               COALESCE(t.txn_round_off_amount, 0) as round_off_amount,
               COALESCE(t.txn_tax_amount, 0) as tax_amount,
               COALESCE(t.txn_discount_amount, 0) as discount_amount,
-              (COALESCE(t.txn_cash_amount, 0) + COALESCE(t.txn_balance_amount, 0) + COALESCE(t.txn_round_off_amount, 0)) as header_total
+              (COALESCE(t.txn_cash_amount, 0) + COALESCE(t.txn_balance_amount, 0)) as header_total
        FROM kb_transactions t
        LEFT JOIN kb_names n ON n.name_id = t.txn_name_id
        WHERE t.txn_type IN (1, 3)
@@ -1159,8 +1285,65 @@ function listOrders() {
       round_off_amount: Number(row.round_off_amount || 0),
       tax_amount: Number(row.tax_amount || 0),
       discount_amount: Number(row.discount_amount || 0),
-      header_total: Number(row.header_total || 0)
+      header_total: Number(row.header_total || 0),
+      round_off_amount: Number(row.round_off_amount || 0)
     }));
+}
+
+function allocateInvoiceValuesFromHeader(rows) {
+  const buckets = new Map();
+  rows.forEach((row, index) => {
+    const orderId = Number(row.order_id || 0);
+    if (!Number.isFinite(orderId) || orderId <= 0) return;
+    const rate = Number(row.gst_rate || 0);
+    const taxable = Number(row.taxable_value || 0);
+    const calcValue = taxable + taxable * (rate / 100);
+    const headerValue = Number(row.header_invoice_total || 0);
+    const bucket = buckets.get(orderId) || {
+      headerValue,
+      calcTotal: 0,
+      entries: []
+    };
+    bucket.entries.push({ index, calcValue });
+    bucket.calcTotal += calcValue;
+    if (Number.isFinite(headerValue) && headerValue > 0) {
+      bucket.headerValue = headerValue;
+    }
+    buckets.set(orderId, bucket);
+  });
+
+  const allocated = new Array(rows.length).fill(null);
+  buckets.forEach((bucket) => {
+    const { entries, calcTotal } = bucket;
+    const header = Number.isFinite(bucket.headerValue) && bucket.headerValue > 0 ? bucket.headerValue : calcTotal;
+    if (!entries.length) return;
+
+    if (!Number.isFinite(calcTotal) || calcTotal <= 0) {
+      const first = entries[0];
+      allocated[first.index] = Number(header.toFixed(2));
+      for (let i = 1; i < entries.length; i += 1) {
+        allocated[entries[i].index] = 0;
+      }
+      return;
+    }
+
+    let running = 0;
+    entries.forEach((entry, idx) => {
+      if (idx === entries.length - 1) {
+        allocated[entry.index] = Number((header - running).toFixed(2));
+        return;
+      }
+      const share = (header * entry.calcValue) / calcTotal;
+      const rounded = Number(share.toFixed(2));
+      allocated[entry.index] = rounded;
+      running += rounded;
+    });
+  });
+
+  return rows.map((row, index) => ({
+    ...row,
+    invoice_value: Number((allocated[index] ?? 0).toFixed(2))
+  }));
 }
 
 function listGstr1SalesReport(range = {}) {
@@ -1190,6 +1373,7 @@ function listGstr1SalesReport(range = {}) {
               COALESCE(n.name_gstin_number, '') as party_gstin,
               COALESCE(n.full_name, '') as party_name,
               COALESCE(NULLIF(TRIM(t.txn_place_of_supply), ''), n.name_state, '') as place_of_supply,
+              MAX(COALESCE(t.txn_cash_amount, 0) + COALESCE(t.txn_balance_amount, 0)) as header_invoice_total,
               COALESCE(tc.tax_rate, itax.tax_rate, 0) as gst_rate,
               SUM(COALESCE(l.total_amount, COALESCE(l.quantity, 0) * COALESCE(l.priceperunit, 0))) as taxable_value
        FROM kb_transactions t
@@ -1210,12 +1394,20 @@ function listGstr1SalesReport(range = {}) {
                 gst_rate
        ORDER BY date(t.txn_date) ASC, t.txn_id ASC`
     )
-    .all({ from_date: fromDate, to_date: toDate })
-    .map((row) => {
+    .all({ from_date: fromDate, to_date: toDate });
+
+  const allocatedRows = allocateInvoiceValuesFromHeader(rows);
+
+  return {
+    company: {
+      gstin: company.gstin || '',
+      legal_name: company.legal_name || '',
+      trade_name: ''
+    },
+    rows: allocatedRows.map((row) => {
       const rate = Number(row.gst_rate || 0);
       const taxable = Number(row.taxable_value || 0);
       const taxAmount = taxable * (rate / 100);
-      const invoiceValue = taxable + taxAmount;
       const isInterState =
         company.state &&
         row.place_of_supply &&
@@ -1227,7 +1419,7 @@ function listGstr1SalesReport(range = {}) {
         transaction_type: 'Sale',
         invoice_no: row.invoice_no || String(row.order_id),
         invoice_date: row.invoice_date || '',
-        invoice_value: Number(invoiceValue.toFixed(2)),
+        invoice_value: Number(row.invoice_value || 0),
         rate: Number(rate.toFixed(2)),
         cess_rate: 0,
         taxable_value: Number(taxable.toFixed(2)),
@@ -1239,15 +1431,322 @@ function listGstr1SalesReport(range = {}) {
         place_of_supply: row.place_of_supply || '',
         order_id: row.order_id
       };
+    })
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* UQC mapping for GST HSN summary sheets                             */
+/* ------------------------------------------------------------------ */
+const UQC_MAP = {
+  pcs: 'PCS-PIECES', pieces: 'PCS-PIECES', pc: 'PCS-PIECES',
+  pac: 'PAC-PACKS', packs: 'PAC-PACKS', pack: 'PAC-PACKS',
+  rol: 'ROL-ROLLS', rolls: 'ROL-ROLLS', roll: 'ROL-ROLLS',
+  box: 'BOX-BOX', bottles: 'BTL-BOTTLES', btl: 'BTL-BOTTLES',
+  kg: 'KGS-KILOGRAMS', kgs: 'KGS-KILOGRAMS',
+  ltr: 'LTR-LITRES', l: 'LTR-LITRES',
+  mtr: 'MTR-METRES', m: 'MTR-METRES',
+  oth: 'OTH-OTHERS'
+};
+function toUqc(unitStr) {
+  return UQC_MAP[(unitStr || '').trim().toLowerCase()] || 'OTH-OTHERS';
+}
+
+/**
+ * Build the full GSTR-1 report with all sections.
+ * Returns classified data for all 14 sheets:
+ *   company, mainRows, b2bRows, b2clRows, b2cs,
+ *   hsnB2B, hsnB2C, itemSummary, exemp, docs, validations
+ */
+function buildGstr1FullReport(range = {}) {
+  const db = getDb();
+  const fromDate = String(range?.from_date || '').trim();
+  const toDate = String(range?.to_date || '').trim();
+  if (!fromDate || !toDate) {
+    throw new Error('from_date and to_date are required');
+  }
+
+  /* ---------- company metadata ---------- */
+  const company = db
+    .prepare(
+      `SELECT COALESCE(firm_gstin_number, '') as gstin,
+              COALESCE(firm_name, '') as legal_name,
+              COALESCE(firm_state, '') as state
+       FROM kb_firms
+       ORDER BY firm_id DESC
+       LIMIT 1`
+    )
+    .get() || { gstin: '', legal_name: '', state: '' };
+
+  const companyState = (company.state || '').trim().toLowerCase();
+
+  /* ---------- Query 1: invoice-level rows (for main, b2b, b2cl, b2cs) ---------- */
+  const invoiceRows = db
+    .prepare(
+      `SELECT t.txn_id as order_id,
+              t.txn_date as invoice_date,
+              t.txn_ref_number_char as invoice_no,
+              COALESCE(n.name_gstin_number, '') as party_gstin,
+              COALESCE(n.full_name, '') as party_name,
+              COALESCE(NULLIF(TRIM(t.txn_place_of_supply), ''), n.name_state, '') as place_of_supply,
+              MAX(COALESCE(t.txn_cash_amount, 0) + COALESCE(t.txn_balance_amount, 0)) as header_invoice_total,
+              COALESCE(tc.tax_rate, itax.tax_rate, 0) as gst_rate,
+              SUM(COALESCE(l.total_amount, COALESCE(l.quantity, 0) * COALESCE(l.priceperunit, 0))) as taxable_value
+       FROM kb_transactions t
+       JOIN kb_lineitems l ON l.lineitem_txn_id = t.txn_id
+       LEFT JOIN kb_names n ON n.name_id = t.txn_name_id
+       LEFT JOIN kb_tax_code tc ON tc.tax_code_id = l.lineitem_tax_id
+       LEFT JOIN kb_items i ON i.item_id = l.item_id
+       LEFT JOIN kb_tax_code itax ON itax.tax_code_id = i.item_tax_id
+       WHERE t.txn_type = 1
+         AND date(t.txn_date) >= date(@from_date)
+         AND date(t.txn_date) <= date(@to_date)
+       GROUP BY t.txn_id,
+                t.txn_date,
+                t.txn_ref_number_char,
+                n.name_gstin_number,
+                n.full_name,
+                place_of_supply,
+                gst_rate
+       ORDER BY date(t.txn_date) ASC, t.txn_id ASC`
+    )
+    .all({ from_date: fromDate, to_date: toDate });
+
+  const allocatedInvoiceRows = allocateInvoiceValuesFromHeader(invoiceRows);
+
+  /* ---------- Compute mainRows with tax split ---------- */
+  const mainRows = allocatedInvoiceRows.map((row) => {
+    const rate = Number(row.gst_rate || 0);
+    const taxable = Number(row.taxable_value || 0);
+    const taxAmount = taxable * (rate / 100);
+    const isInterState =
+      companyState &&
+      row.place_of_supply &&
+      companyState !== String(row.place_of_supply).trim().toLowerCase();
+
+    return {
+      gstin_uin: row.party_gstin || '',
+      party_name: row.party_name || '',
+      transaction_type: 'Sale',
+      invoice_no: row.invoice_no || String(row.order_id),
+      invoice_date: row.invoice_date || '',
+      invoice_value: Number(row.invoice_value || 0),
+      rate: Number(rate.toFixed(2)),
+      cess_rate: 0,
+      taxable_value: Number(taxable.toFixed(2)),
+      reverse_charge: 'N',
+      integrated_tax_amount: isInterState ? Number(taxAmount.toFixed(2)) : 0,
+      central_tax_amount: isInterState ? 0 : Number((taxAmount / 2).toFixed(2)),
+      state_ut_tax_amount: isInterState ? 0 : Number((taxAmount / 2).toFixed(2)),
+      cess_amount: 0,
+      place_of_supply: row.place_of_supply || '',
+      order_id: row.order_id,
+      _isInterState: isInterState
+    };
+  });
+
+  /* ---------- Classify: B2B / B2CL / B2CS ---------- */
+  const b2bRows = [];
+  const b2clRows = [];
+  const b2csRawRows = [];
+
+  mainRows.forEach((row) => {
+    const hasGstin = row.gstin_uin && row.gstin_uin.trim() !== '';
+    if (hasGstin) {
+      b2bRows.push(row);
+    } else if (row._isInterState && row.invoice_value > 250000) {
+      b2clRows.push(row);
+    } else {
+      b2csRawRows.push(row);
+    }
+  });
+
+  // B2CS: aggregate by (place_of_supply, rate)
+  const b2csMap = new Map();
+  b2csRawRows.forEach((r) => {
+    const key = `${r.place_of_supply}|${r.rate}`;
+    const cur = b2csMap.get(key) || {
+      type: 'OE',
+      place_of_supply: r.place_of_supply,
+      rate: r.rate,
+      taxable_value: 0,
+      cess: 0
+    };
+    cur.taxable_value += r.taxable_value;
+    b2csMap.set(key, cur);
+  });
+  const b2cs = [...b2csMap.values()].map((r) => ({
+    ...r,
+    taxable_value: Number(r.taxable_value.toFixed(2))
+  }));
+
+  /* ---------- Query 2: line-item-level rows (for HSN, exemp) ---------- */
+  const lineItems = db
+    .prepare(
+      `SELECT t.txn_id AS order_id,
+              COALESCE(n.name_gstin_number, '') AS party_gstin,
+              COALESCE(NULLIF(TRIM(t.txn_place_of_supply), ''), n.name_state, '') AS place_of_supply,
+              COALESCE(tc.tax_rate, itax.tax_rate, 0) AS gst_rate,
+              COALESCE(l.total_amount, COALESCE(l.quantity, 0) * COALESCE(l.priceperunit, 0)) AS taxable_value,
+              COALESCE(l.quantity, 0) AS qty,
+              COALESCE(i.item_hsn_sac_code, '') AS hsn,
+              COALESCE(i.item_name, '') AS item_name,
+              COALESCE(lu.unit_short_name, lu.unit_name, bu.unit_short_name, bu.unit_name, '') AS unit
+       FROM kb_transactions t
+       JOIN kb_lineitems l ON l.lineitem_txn_id = t.txn_id
+       LEFT JOIN kb_names n ON n.name_id = t.txn_name_id
+       LEFT JOIN kb_tax_code tc ON tc.tax_code_id = l.lineitem_tax_id
+       LEFT JOIN kb_items i ON i.item_id = l.item_id
+       LEFT JOIN kb_tax_code itax ON itax.tax_code_id = i.item_tax_id
+       LEFT JOIN kb_item_units lu ON lu.unit_id = l.lineitem_unit_id
+       LEFT JOIN kb_item_units bu ON bu.unit_id = i.base_unit_id
+       WHERE t.txn_type = 1
+         AND date(t.txn_date) >= date(@from_date)
+         AND date(t.txn_date) <= date(@to_date)
+       ORDER BY t.txn_id ASC, l.lineitem_id ASC`
+    )
+    .all({ from_date: fromDate, to_date: toDate });
+
+  /* ---------- Build set of B2B order IDs ---------- */
+  const b2bOrderIds = new Set(b2bRows.map((r) => r.order_id));
+
+  /* ---------- HSN aggregation helper ---------- */
+  function aggregateHsn(lines, includeItemName) {
+    const map = new Map();
+    lines.forEach((line) => {
+      const uqc = toUqc(line.unit);
+      const rate = Number(line.gst_rate || 0);
+      const taxable = Number(line.taxable_value || 0);
+      const taxAmount = taxable * (rate / 100);
+      const isInter =
+        companyState &&
+        line.place_of_supply &&
+        companyState !== String(line.place_of_supply).trim().toLowerCase();
+
+      const key = includeItemName
+        ? `${line.hsn}|${line.item_name}|${uqc}|${rate}`
+        : `${line.hsn}|${uqc}|${rate}`;
+
+      const cur = map.get(key) || {
+        hsn: line.hsn,
+        description: includeItemName ? line.item_name : '',
+        uqc,
+        qty: 0,
+        totalValue: 0,
+        taxableValue: 0,
+        rate,
+        igst: 0,
+        cgst: 0,
+        sgst: 0,
+        cess: 0
+      };
+      cur.qty += Number(line.qty || 0);
+      cur.taxableValue += taxable;
+      cur.totalValue += taxable + taxAmount;
+      cur.igst += isInter ? taxAmount : 0;
+      cur.cgst += isInter ? 0 : taxAmount / 2;
+      cur.sgst += isInter ? 0 : taxAmount / 2;
+      map.set(key, cur);
     });
+    return [...map.values()].map((r) => ({
+      ...r,
+      totalValue: Number(r.totalValue.toFixed(2)),
+      taxableValue: Number(r.taxableValue.toFixed(2)),
+      igst: Number(r.igst.toFixed(2)),
+      cgst: Number(r.cgst.toFixed(2)),
+      sgst: Number(r.sgst.toFixed(2)),
+      cess: Number(r.cess.toFixed(2))
+    }));
+  }
+
+  const b2bLineItems = lineItems.filter((l) => b2bOrderIds.has(l.order_id));
+  const b2cLineItems = lineItems.filter((l) => !b2bOrderIds.has(l.order_id));
+
+  const hsnB2B = aggregateHsn(b2bLineItems, false);
+  const hsnB2C = aggregateHsn(b2cLineItems, false);
+  const itemSummary = aggregateHsn(lineItems, true);
+
+  /* ---------- Exemp: 0% GST line items split by inter/intra + registered/unregistered ---------- */
+  const exemp = { interReg: 0, intraReg: 0, interUnreg: 0, intraUnreg: 0 };
+  lineItems
+    .filter((l) => Number(l.gst_rate || 0) === 0)
+    .forEach((l) => {
+      const hasGstin = l.party_gstin && l.party_gstin.trim() !== '';
+      const isInter =
+        companyState &&
+        l.place_of_supply &&
+        companyState !== String(l.place_of_supply).trim().toLowerCase();
+      if (isInter && hasGstin) exemp.interReg += Number(l.taxable_value || 0);
+      else if (!isInter && hasGstin) exemp.intraReg += Number(l.taxable_value || 0);
+      else if (isInter && !hasGstin) exemp.interUnreg += Number(l.taxable_value || 0);
+      else exemp.intraUnreg += Number(l.taxable_value || 0);
+    });
+  exemp.interReg = Number(exemp.interReg.toFixed(2));
+  exemp.intraReg = Number(exemp.intraReg.toFixed(2));
+  exemp.interUnreg = Number(exemp.interUnreg.toFixed(2));
+  exemp.intraUnreg = Number(exemp.intraUnreg.toFixed(2));
+
+  /* ---------- Docs: invoice number range and count ---------- */
+  const docsRow = db
+    .prepare(
+      `SELECT MIN(CAST(TRIM(txn_ref_number_char) AS INTEGER)) AS min_ref,
+              MAX(CAST(TRIM(txn_ref_number_char) AS INTEGER)) AS max_ref,
+              COUNT(*) AS total
+       FROM kb_transactions
+       WHERE txn_type = 1
+         AND date(txn_date) >= date(@from_date)
+         AND date(txn_date) <= date(@to_date)
+         AND TRIM(COALESCE(txn_ref_number_char, '')) <> ''
+         AND TRIM(txn_ref_number_char) NOT GLOB '*[^0-9]*'`
+    )
+    .get({ from_date: fromDate, to_date: toDate }) || {};
+  const docs = {
+    from: docsRow.min_ref != null ? String(docsRow.min_ref) : '',
+    to: docsRow.max_ref != null ? String(docsRow.max_ref) : '',
+    total: String(docsRow.total || 0),
+    cancelled: '0'
+  };
+
+  /* ---------- Reconciliation validations ---------- */
+  const validations = [];
+  const b2bTaxable = b2bRows.reduce((s, r) => s + r.taxable_value, 0);
+  const b2csTaxable = b2cs.reduce((s, r) => s + r.taxable_value, 0);
+  const b2clTaxable = b2clRows.reduce((s, r) => s + r.taxable_value, 0);
+  const mainTaxable = mainRows.reduce((s, r) => s + r.taxable_value, 0);
+  const splitTotal = b2bTaxable + b2csTaxable + b2clTaxable;
+  if (Math.abs(splitTotal - mainTaxable) > 0.05) {
+    validations.push({
+      level: 'warning',
+      msg: `B2B+B2CS+B2CL taxable (${splitTotal.toFixed(2)}) ≠ Main total (${mainTaxable.toFixed(2)})`
+    });
+  }
+
+  const hsnTotal =
+    hsnB2B.reduce((s, r) => s + r.taxableValue, 0) + hsnB2C.reduce((s, r) => s + r.taxableValue, 0);
+  if (Math.abs(hsnTotal - mainTaxable) > 0.05) {
+    validations.push({
+      level: 'warning',
+      msg: `HSN(b2b)+HSN(b2c) taxable (${hsnTotal.toFixed(2)}) ≠ Main total (${mainTaxable.toFixed(2)})`
+    });
+  }
 
   return {
     company: {
       gstin: company.gstin || '',
       legal_name: company.legal_name || '',
-      trade_name: ''
+      trade_name: '',
+      state: company.state || ''
     },
-    rows
+    mainRows,
+    b2bRows,
+    b2clRows,
+    b2cs,
+    hsnB2B,
+    hsnB2C,
+    itemSummary,
+    exemp,
+    docs,
+    validations
   };
 }
 
@@ -1261,7 +1760,8 @@ function getOrder(orderId) {
               t.txn_name_id as party_id,
               t.txn_ref_number_char as ref_number,
               t.txn_place_of_supply as place_of_supply,
-              COALESCE(t.txn_balance_amount, 0) as balance_amount
+              COALESCE(t.txn_balance_amount, 0) as balance_amount,
+              COALESCE(t.txn_round_off_amount, 0) as round_off_amount
        FROM kb_transactions t
        WHERE t.txn_id = ?`
     )
@@ -1275,7 +1775,8 @@ function getOrder(orderId) {
     notes: row.notes,
     ref_number: row.ref_number || '',
     place_of_supply: row.place_of_supply || '',
-    balance_amount: Number(row.balance_amount || 0)
+    balance_amount: Number(row.balance_amount || 0),
+    round_off_amount: Number(row.round_off_amount || 0)
   };
 }
 
@@ -1308,6 +1809,7 @@ function listOrderItems(orderId) {
 function updateOrder(orderId, order) {
   const db = getDb();
   const txnType = order.order_type === 'purchase' ? 3 : 1;
+  const applyRoundOff = txnType === 1 && Boolean(order.apply_round_off);
 
   const updateOrderStmt = db.prepare(
     `UPDATE kb_transactions
@@ -1318,7 +1820,8 @@ function updateOrder(orderId, order) {
          txn_description = @txn_description,
          txn_place_of_supply = @txn_place_of_supply,
          txn_cash_amount = @txn_cash_amount,
-         txn_balance_amount = @txn_balance_amount
+         txn_balance_amount = @txn_balance_amount,
+         txn_round_off_amount = @txn_round_off_amount
      WHERE txn_id = @txn_id`
   );
   const deleteLines = db.prepare('DELETE FROM kb_lineitems WHERE lineitem_txn_id = ?');
@@ -1373,10 +1876,18 @@ function updateOrder(orderId, order) {
       const baseAmount = qty * rate;
       return sum + baseAmount * (1 + gstRate / 100);
     }, 0);
+    let roundOffAmount = 0;
+    let effectiveTotal = invoiceTotal;
+    if (applyRoundOff) {
+      const decimal = effectiveTotal - Math.floor(effectiveTotal);
+      const rounded = decimal > 0.5 ? Math.ceil(effectiveTotal) : Math.floor(effectiveTotal);
+      roundOffAmount = Number((rounded - effectiveTotal).toFixed(2));
+      effectiveTotal = rounded;
+    }
     const requestedBalanceRaw = Number(payload.balance_amount || 0);
     const requestedBalance = Number.isFinite(requestedBalanceRaw) ? requestedBalanceRaw : 0;
-    const clampedBalance = Math.min(Math.max(requestedBalance, 0), invoiceTotal);
-    const cashAmount = invoiceTotal - clampedBalance;
+    const clampedBalance = Math.min(Math.max(requestedBalance, 0), effectiveTotal);
+    const cashAmount = effectiveTotal - clampedBalance;
     const companyState =
       (db.prepare('SELECT firm_state FROM kb_firms ORDER BY firm_id DESC LIMIT 1').get() || {}).firm_state || '';
     const partyState =
@@ -1400,7 +1911,8 @@ function updateOrder(orderId, order) {
       txn_description: payload.notes || '',
       txn_place_of_supply: placeOfSupply,
       txn_cash_amount: cashAmount,
-      txn_balance_amount: clampedBalance
+      txn_balance_amount: clampedBalance,
+      txn_round_off_amount: roundOffAmount
     });
 
     if (existingOrder.txn_type === 3) {
@@ -1474,7 +1986,7 @@ function updateOrder(orderId, order) {
         lineitem_unit_id: hasUnitId ? resolvedUnitIdNum : null,
         lineitem_ist_id: hasIstId ? lineIstId : null,
         lineitem_batch_number: item.batch_no || null,
-        lineitem_expiry_date: item.expiry_date || null,
+        lineitem_expiry_date: normalizeExpiryMonthValue(item.expiry_date),
         lineitem_mrp: item.mrp !== undefined && item.mrp !== null ? Number(item.mrp || 0) : null
       });
     });
@@ -1532,6 +2044,798 @@ function getNextRefNumberByTxnType(db, txnType) {
   return String((Number.isFinite(maxRef) ? maxRef : 0) + 1);
 }
 
+function buildSaleRateMapForParty(db, partyId) {
+  if (!partyId) return new Map();
+  const rows = db
+    .prepare(
+      `SELECT l.item_id as item_id,
+              l.priceperunit as rate
+       FROM kb_lineitems l
+       JOIN kb_transactions t ON t.txn_id = l.lineitem_txn_id
+       WHERE t.txn_type = 1
+         AND t.txn_name_id = @party_id
+         AND l.item_id IS NOT NULL
+         AND COALESCE(l.priceperunit, 0) > 0
+       ORDER BY date(t.txn_date) DESC, t.txn_id DESC, l.lineitem_id DESC`
+    )
+    .all({ party_id: partyId });
+
+  const map = new Map();
+  rows.forEach((row) => {
+    const id = Number(row.item_id);
+    if (!Number.isFinite(id) || id <= 0) return;
+    if (!map.has(id)) map.set(id, Number(row.rate || 0));
+  });
+  return map;
+}
+
+function buildSaleRateMapAny(db) {
+  const rows = db
+    .prepare(
+      `SELECT l.item_id as item_id,
+              l.priceperunit as rate
+       FROM kb_lineitems l
+       JOIN kb_transactions t ON t.txn_id = l.lineitem_txn_id
+       WHERE t.txn_type = 1
+         AND l.item_id IS NOT NULL
+         AND COALESCE(l.priceperunit, 0) > 0
+       ORDER BY date(t.txn_date) DESC, t.txn_id DESC, l.lineitem_id DESC`
+    )
+    .all();
+
+  const map = new Map();
+  rows.forEach((row) => {
+    const id = Number(row.item_id);
+    if (!Number.isFinite(id) || id <= 0) return;
+    if (!map.has(id)) map.set(id, Number(row.rate || 0));
+  });
+  return map;
+}
+
+function listPurchaseItemIdsAsOf(db, asOfDate) {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT l.item_id as item_id
+       FROM kb_lineitems l
+       JOIN kb_transactions t ON t.txn_id = l.lineitem_txn_id
+       WHERE t.txn_type = 3
+         AND l.item_id IS NOT NULL
+         AND date(t.txn_date) <= date(@as_of)`
+    )
+    .all({ as_of: asOfDate });
+  return new Set(
+    rows
+      .map((row) => Number(row.item_id))
+      .filter((id) => Number.isFinite(id) && id > 0)
+  );
+}
+
+function listBatchAvailabilityAsOf(db, itemId, asOfDate) {
+  const rows = db
+    .prepare(
+      `SELECT
+         COALESCE(l.lineitem_batch_number, '') as batch_no,
+         MIN(CASE WHEN t.txn_type = 3 THEN date(t.txn_date) END) as first_purchase_date,
+         MAX(l.lineitem_expiry_date) as expiry_date,
+         MAX(COALESCE(l.lineitem_mrp, 0)) as mrp,
+         SUM(CASE WHEN t.txn_type = 3 THEN COALESCE(l.quantity, 0) ELSE 0 END) as purchase_qty,
+         SUM(CASE WHEN t.txn_type = 1 THEN COALESCE(l.quantity, 0) ELSE 0 END) as sale_qty
+       FROM kb_lineitems l
+       JOIN kb_transactions t ON t.txn_id = l.lineitem_txn_id
+       WHERE l.item_id = @item_id
+         AND t.txn_type IN (1, 3)
+         AND date(t.txn_date) <= date(@as_of)
+       GROUP BY COALESCE(l.lineitem_batch_number, '')`
+    )
+    .all({ item_id: itemId, as_of: asOfDate });
+
+  const trackingRows = db
+    .prepare(
+      `SELECT COALESCE(ist_batch_number, '') as batch_no,
+              MAX(ist_expiry_date) as expiry_date,
+              MAX(COALESCE(ist_mrp, 0)) as mrp
+       FROM kb_item_stock_tracking
+       WHERE ist_item_id = @item_id
+       GROUP BY COALESCE(ist_batch_number, '')`
+    )
+    .all({ item_id: itemId });
+
+  const map = new Map();
+  rows.forEach((row) => {
+    const batchNo = row.batch_no || '';
+    map.set(batchNo, {
+      batch_no: batchNo,
+      expiry_date: row.expiry_date || null,
+      mrp: Number(row.mrp || 0),
+      purchase_qty: Number(row.purchase_qty || 0),
+      sale_qty: Number(row.sale_qty || 0),
+      available_qty: Number(row.purchase_qty || 0) - Number(row.sale_qty || 0),
+      first_purchase_date: row.first_purchase_date || null
+    });
+  });
+
+  trackingRows.forEach((row) => {
+    const batchNo = row.batch_no || '';
+    if (map.has(batchNo)) {
+      const existing = map.get(batchNo);
+      if (!existing.expiry_date && row.expiry_date) existing.expiry_date = row.expiry_date;
+      if (!existing.mrp && row.mrp) existing.mrp = Number(row.mrp || 0);
+      return;
+    }
+    map.set(batchNo, {
+      batch_no: batchNo,
+      expiry_date: row.expiry_date || null,
+      mrp: Number(row.mrp || 0),
+      purchase_qty: 0,
+      sale_qty: 0,
+      available_qty: 0,
+      first_purchase_date: null
+    });
+  });
+
+  return Array.from(map.values()).sort((a, b) => {
+    if (a.first_purchase_date && b.first_purchase_date) {
+      if (a.first_purchase_date !== b.first_purchase_date) {
+        return String(a.first_purchase_date).localeCompare(String(b.first_purchase_date));
+      }
+    } else if (a.first_purchase_date && !b.first_purchase_date) {
+      return -1;
+    } else if (!a.first_purchase_date && b.first_purchase_date) {
+      return 1;
+    }
+    return String(a.batch_no || '').localeCompare(String(b.batch_no || ''));
+  });
+}
+
+function computeInvoiceTotal(lines, basis) {
+  const usePostTax = basis === 'post_tax';
+  return lines.reduce((sum, line) => {
+    const qty = Number(line.qty || 0);
+    const rate = Number(line.rate || 0);
+    const gstRate = Number(line.gst_rate || 0);
+    const base = qty * rate;
+    const total = usePostTax ? base * (1 + gstRate / 100) : base;
+    return sum + total;
+  }, 0);
+}
+
+function createSeededRng(seedValue) {
+  let state = Number(seedValue) % 2147483647;
+  if (!Number.isFinite(state) || state <= 0) state = 1234567;
+  return () => {
+    state = (state * 16807) % 2147483647;
+    return (state - 1) / 2147483646;
+  };
+}
+
+function hashSeed(input) {
+  const text = String(input || '');
+  let hash = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    hash = (hash * 31 + text.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+function sampleWithoutReplacement(pool, count, rng) {
+  const copy = pool.slice();
+  const picked = [];
+  for (let i = 0; i < count && copy.length > 0; i += 1) {
+    const idx = Math.floor(rng() * copy.length);
+    picked.push(copy[idx]);
+    copy.splice(idx, 1);
+  }
+  return picked;
+}
+
+function listExistingInvoiceNumbers(db, txnType, dateFrom, dateTo) {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT TRIM(txn_ref_number_char) as ref
+       FROM kb_transactions
+       WHERE txn_type = @txn_type
+         AND date(txn_date) >= date(@date_from)
+         AND date(txn_date) <= date(@date_to)
+         AND TRIM(COALESCE(txn_ref_number_char, '')) <> ''`
+    )
+    .all({ txn_type: txnType, date_from: dateFrom, date_to: dateTo });
+  return new Set(rows.map((r) => String(r.ref).trim()));
+}
+
+function listExistingInvoiceTotalsByNumber(db, txnType, dateFrom, dateTo) {
+  const rows = db
+    .prepare(
+      `SELECT TRIM(txn_ref_number_char) as ref,
+              SUM(
+                COALESCE(txn_cash_amount, 0) +
+                COALESCE(txn_balance_amount, 0) +
+                COALESCE(txn_round_off_amount, 0)
+              ) as total
+       FROM kb_transactions
+       WHERE txn_type = @txn_type
+         AND date(txn_date) >= date(@date_from)
+         AND date(txn_date) <= date(@date_to)
+         AND TRIM(COALESCE(txn_ref_number_char, '')) <> ''
+       GROUP BY TRIM(txn_ref_number_char)`
+    )
+    .all({ txn_type: txnType, date_from: dateFrom, date_to: dateTo });
+  const map = new Map();
+  rows.forEach((row) => {
+    const ref = String(row.ref || '').trim();
+    if (!ref) return;
+    map.set(ref, Number(row.total || 0));
+  });
+  return map;
+}
+
+function distributeAmountRandomly(totalAmount, count, rng) {
+  if (!Number.isFinite(totalAmount) || totalAmount <= 0 || count <= 0) {
+    return Array.from({ length: Math.max(0, count) }, () => 0);
+  }
+  const totalPaise = Math.max(0, Math.round(totalAmount * 100));
+  if (totalPaise <= 0) return Array.from({ length: count }, () => 0);
+  if (count === 1) return [Number((totalPaise / 100).toFixed(2))];
+
+  const weights = Array.from({ length: count }, () => rng() + 0.0001);
+  const weightSum = weights.reduce((sum, value) => sum + value, 0);
+  const paise = Array.from({ length: count }, () => 0);
+
+  let allocated = 0;
+  for (let i = 0; i < count; i += 1) {
+    const share = Math.floor((weights[i] / weightSum) * totalPaise);
+    paise[i] = share;
+    allocated += share;
+  }
+
+  let remaining = totalPaise - allocated;
+  while (remaining > 0) {
+    const idx = Math.floor(rng() * count);
+    paise[Math.max(0, Math.min(count - 1, idx))] += 1;
+    remaining -= 1;
+  }
+
+  return paise.map((value) => Number((value / 100).toFixed(2)));
+}
+
+function roundOffAmount(value) {
+  const amount = Number(value || 0);
+  if (!Number.isFinite(amount)) return 0;
+  const decimal = amount - Math.floor(amount);
+  return decimal > 0.5 ? Math.ceil(amount) : Math.floor(amount);
+}
+
+function distributeRoundedAmountsRandomly(totalAmount, count, rng, minPerInvoiceValue = 1) {
+  if (!Number.isFinite(totalAmount) || totalAmount <= 0 || count <= 0) {
+    return Array.from({ length: Math.max(0, count) }, () => 0);
+  }
+  const targetSum = Math.max(0, roundOffAmount(totalAmount));
+  if (targetSum <= 0) return Array.from({ length: count }, () => 0);
+  if (count === 1) return [targetSum];
+
+  const requestedMin = Math.max(0, Math.floor(Number(minPerInvoiceValue || 0)));
+  const maxPossibleMin = Math.floor(targetSum / count);
+  const minEach = Math.max(0, Math.min(requestedMin, maxPossibleMin));
+  const remaining = targetSum - minEach * count;
+  if (remaining <= 0) return Array.from({ length: count }, () => minEach);
+
+  // Use random cut points (stick-breaking) to increase variance between invoices.
+  const cuts = [];
+  for (let i = 0; i < count - 1; i += 1) {
+    cuts.push(Math.floor(rng() * (remaining + 1)));
+  }
+  cuts.sort((a, b) => a - b);
+
+  const parts = [];
+  let prev = 0;
+  for (let i = 0; i < cuts.length; i += 1) {
+    parts.push(cuts[i] - prev);
+    prev = cuts[i];
+  }
+  parts.push(remaining - prev);
+
+  const amounts = parts.map((part) => part + minEach);
+  return sampleWithoutReplacement(amounts, amounts.length, rng);
+}
+
+function weightedPickOne(values, weightMap, rng) {
+  const totalWeight = values.reduce((sum, value) => sum + Number(weightMap.get(value) || 0), 0);
+  if (!Number.isFinite(totalWeight) || totalWeight <= 0) {
+    const idx = Math.floor(rng() * values.length);
+    return values[Math.max(0, Math.min(values.length - 1, idx))];
+  }
+  let cursor = rng() * totalWeight;
+  for (let i = 0; i < values.length; i += 1) {
+    cursor -= Number(weightMap.get(values[i]) || 0);
+    if (cursor <= 0) return values[i];
+  }
+  return values[values.length - 1];
+}
+
+function distributeRangeInvoicesByPartyAndDate({ invoiceNumbers, partyIds, year, month, lastDay, rng }) {
+  const totalInvoices = invoiceNumbers.length;
+  if (!totalInvoices) return [];
+  const validDays = [];
+  for (let day = 1; day <= lastDay; day += 1) {
+    const weekday = new Date(year, month - 1, day).getDay();
+    if (weekday !== 0) validDays.push(day);
+  }
+  if (!validDays.length) {
+    throw new Error('No valid generation dates found in the selected month.');
+  }
+
+  if (totalInvoices > partyIds.length * validDays.length) {
+    throw new Error(
+      'Cannot avoid duplicate non-Sunday dates per party for this month. Reduce invoices or select more parties.'
+    );
+  }
+
+  const entries = invoiceNumbers.map((invoiceNo, idx) => {
+    const dayOffset = Math.floor((idx * validDays.length) / totalInvoices);
+    const day = validDays[Math.min(dayOffset, validDays.length - 1)];
+    return {
+      invoice_no: invoiceNo,
+      day,
+      date: `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
+      party_id: null
+    };
+  });
+
+  const targetByParty = new Map();
+  const base = Math.floor(totalInvoices / partyIds.length);
+  partyIds.forEach((partyId) => targetByParty.set(partyId, base));
+  let remainder = totalInvoices - base * partyIds.length;
+  if (remainder > 0) {
+    const shuffled = sampleWithoutReplacement(partyIds, partyIds.length, rng);
+    for (let i = 0; i < remainder; i += 1) {
+      const partyId = shuffled[i];
+      targetByParty.set(partyId, Number(targetByParty.get(partyId) || 0) + 1);
+    }
+  }
+
+  for (let i = 0; i < partyIds.length; i += 1) {
+    const partyId = partyIds[i];
+    if (Number(targetByParty.get(partyId) || 0) > validDays.length) {
+      throw new Error(
+        'Cannot avoid duplicate non-Sunday dates per party for this month. Reduce invoices or select more parties.'
+      );
+    }
+  }
+
+  const byDay = new Map();
+  entries.forEach((entry) => {
+    if (!byDay.has(entry.day)) byDay.set(entry.day, []);
+    byDay.get(entry.day).push(entry);
+  });
+  const days = Array.from(byDay.keys()).sort((a, b) => a - b);
+  const remainingByParty = new Map(targetByParty);
+
+  days.forEach((day, dayIndex) => {
+    const dayEntries = byDay.get(day) || [];
+    if (dayEntries.length > partyIds.length) {
+      throw new Error(
+        'Cannot avoid duplicate non-Sunday dates per party for this month. Reduce invoices or select more parties.'
+      );
+    }
+
+    const daysLeftIncludingToday = days.length - dayIndex;
+    const picked = [];
+    const pickedSet = new Set();
+
+    const forced = partyIds.filter((partyId) => {
+      const left = Number(remainingByParty.get(partyId) || 0);
+      return left > 0 && left === daysLeftIncludingToday;
+    });
+
+    if (forced.length > dayEntries.length) {
+      throw new Error('Unable to spread invoices evenly without duplicate party dates.');
+    }
+
+    forced.forEach((partyId) => {
+      picked.push(partyId);
+      pickedSet.add(partyId);
+    });
+
+    while (picked.length < dayEntries.length) {
+      const candidates = partyIds.filter((partyId) => {
+        const left = Number(remainingByParty.get(partyId) || 0);
+        return left > 0 && !pickedSet.has(partyId);
+      });
+      if (!candidates.length) {
+        throw new Error('Unable to spread invoices evenly without duplicate party dates.');
+      }
+      const nextParty = weightedPickOne(candidates, remainingByParty, rng);
+      picked.push(nextParty);
+      pickedSet.add(nextParty);
+    }
+
+    const orderedForDay = sampleWithoutReplacement(picked, picked.length, rng);
+    dayEntries.forEach((entry, idx) => {
+      const assignedPartyId = orderedForDay[idx];
+      entry.party_id = assignedPartyId;
+      remainingByParty.set(assignedPartyId, Number(remainingByParty.get(assignedPartyId) || 0) - 1);
+    });
+  });
+
+  for (let i = 0; i < partyIds.length; i += 1) {
+    const partyId = partyIds[i];
+    if (Number(remainingByParty.get(partyId) || 0) !== 0) {
+      throw new Error('Unable to spread invoices evenly across parties.');
+    }
+  }
+
+  return entries;
+}
+
+function bulkGenerateSalesOrders(payload) {
+  const db = getDb();
+
+  // --- Range mode detection ---
+  const isRangeMode =
+    payload.month &&
+    payload.invoice_start != null &&
+    payload.invoice_end != null;
+
+  // Resolve party IDs: range mode supports multiple, manual mode uses single
+  let partyIds;
+  if (isRangeMode) {
+    const rawPartyIds = Array.isArray(payload?.party_ids) ? payload.party_ids : [];
+    if (rawPartyIds.length) {
+      partyIds = rawPartyIds
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id > 0);
+    } else {
+      const single = Number(payload?.party_id);
+      partyIds = Number.isFinite(single) && single > 0 ? [single] : [];
+    }
+    if (!partyIds.length) {
+      throw new Error('At least one party is required.');
+    }
+  } else {
+    const partyId = Number(payload?.party_id);
+    if (!Number.isFinite(partyId) || partyId <= 0) {
+      throw new Error('party_id is required.');
+    }
+    partyIds = [partyId];
+  }
+
+  let rawInvoices;
+  const skipped = [];
+  const presetWarnings = [];
+
+  if (isRangeMode) {
+    const monthStr = String(payload.month).trim();
+    const monthMatch = monthStr.match(/^(\d{4})-(\d{2})$/);
+    if (!monthMatch) {
+      throw new Error('Invalid month format. Use YYYY-MM.');
+    }
+    const year = Number(monthMatch[1]);
+    const month = Number(monthMatch[2]);
+    const dateFrom = `${year}-${String(month).padStart(2, '0')}-01`;
+    const lastDay = new Date(year, month, 0).getDate();
+    const dateTo = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+    const invoiceStart = Number(payload.invoice_start);
+    const invoiceEnd = Number(payload.invoice_end);
+    if (
+      !Number.isFinite(invoiceStart) ||
+      !Number.isFinite(invoiceEnd) ||
+      invoiceEnd < invoiceStart
+    ) {
+      throw new Error('Invalid invoice number range.');
+    }
+
+    // Generate all candidate numbers
+    const allNumbers = [];
+    for (let n = invoiceStart; n <= invoiceEnd; n += 1) {
+      allNumbers.push(String(n));
+    }
+
+    // Check which already exist
+    const existingSet = listExistingInvoiceNumbers(db, 1, dateFrom, dateTo);
+    const remaining = [];
+    allNumbers.forEach((num) => {
+      if (existingSet.has(num)) {
+        skipped.push(num);
+      } else {
+        remaining.push(num);
+      }
+    });
+
+    if (!remaining.length) {
+      return { created: [], skipped, warnings: [{ message: 'All invoice numbers already exist in this date range.' }] };
+    }
+
+    // Distribute dates uniformly across non-Sundays
+    const targetTotal = Number(payload.target_total || 0);
+    const defaultBasis = normalizeAmountBasis(payload?.amount_basis || 'post_tax');
+    const notes = String(payload?.notes || '').trim();
+    const existingTotalsByNo = listExistingInvoiceTotalsByNumber(db, 1, dateFrom, dateTo);
+    const existingRangeTotal = skipped.reduce((sum, no) => sum + Number(existingTotalsByNo.get(String(no)) || 0), 0);
+
+    const requestedSeed = Number(payload?.random_seed);
+    const runtimeSeed = Number.isFinite(requestedSeed)
+      ? requestedSeed
+      : Date.now() + Math.floor(Math.random() * 1000000);
+    const allocationSeed = hashSeed(
+      `${year}-${String(month).padStart(2, '0')}-${invoiceStart}-${invoiceEnd}-${partyIds.join(',')}-${runtimeSeed}`
+    );
+    const allocationRng = createSeededRng(allocationSeed);
+    const distributed = distributeRangeInvoicesByPartyAndDate({
+      invoiceNumbers: remaining,
+      partyIds,
+      year,
+      month,
+      lastDay,
+      rng: allocationRng
+    });
+    let randomizedAmounts = Array.from({ length: remaining.length }, () => 0);
+    if (Number.isFinite(targetTotal) && targetTotal > 0 && remaining.length > 0) {
+      const pendingTarget = Number((targetTotal - existingRangeTotal).toFixed(2));
+      if (pendingTarget <= 0) {
+        presetWarnings.push({
+          message: `Target already met by existing invoices in range (existing total ${existingRangeTotal.toFixed(2)}).`
+        });
+      } else {
+        const explicitMin = Number(payload?.min_invoice_amount || 0);
+        const avg = pendingTarget / remaining.length;
+        const heuristicMin = Math.max(1, Math.floor(avg * 0.25));
+        const minPerInvoice = Number.isFinite(explicitMin) && explicitMin > 0 ? explicitMin : heuristicMin;
+        randomizedAmounts = distributeRoundedAmountsRandomly(pendingTarget, remaining.length, allocationRng, minPerInvoice);
+      }
+    }
+
+    rawInvoices = distributed.map((entry, idx) => ({
+      date: entry.date,
+      invoice_no: entry.invoice_no,
+      party_id: entry.party_id,
+      total_amount: Number(randomizedAmounts[idx] || 0),
+      amount_basis: defaultBasis,
+      notes
+    }));
+  } else {
+    rawInvoices = Array.isArray(payload?.invoices) ? payload.invoices : [];
+    if (!rawInvoices.length) {
+      throw new Error('At least one invoice is required.');
+    }
+  }
+
+  const items = listItems();
+  if (!items.length) {
+    throw new Error('No items available.');
+  }
+  const itemsById = new Map();
+  items.forEach((item) => {
+    const id = Number(item.id);
+    if (!Number.isFinite(id) || id <= 0) return;
+    itemsById.set(id, item);
+  });
+
+  const includeIds = Array.isArray(payload?.items_include) ? payload.items_include : [];
+  const excludeIds = Array.isArray(payload?.items_exclude) ? payload.items_exclude : [];
+  const includeSet = new Set(
+    includeIds
+      .map((id) => Number(id))
+      .filter((id) => Number.isFinite(id) && itemsById.has(id))
+  );
+  const excludeSet = new Set(
+    excludeIds
+      .map((id) => Number(id))
+      .filter((id) => Number.isFinite(id) && itemsById.has(id))
+  );
+
+  const minItems = Math.max(1, Number(payload?.min_items || 4));
+  const maxItems = Math.max(minItems, Number(payload?.max_items || minItems + 3));
+  const variancePct = Number(payload?.rate_variance_pct ?? 20);
+  const maxVariance = Math.max(0.1, Math.min(0.2, variancePct / 100));
+  const defaultBasis = normalizeAmountBasis(payload?.amount_basis);
+
+  const invoices = rawInvoices.map((invoice, index) => {
+    const dateValue = normalizeDateValue(invoice?.date || invoice?.order_date || invoice?.invoice_date);
+    if (!dateValue) {
+      throw new Error(`Invalid date for invoice ${index + 1}.`);
+    }
+    return {
+      index,
+      date: dateValue,
+      invoice_no: String(invoice?.invoice_no || invoice?.ref_number || '').trim(),
+      party_id: Number(invoice?.party_id || (isRangeMode ? 0 : partyIds[0])),
+      total_amount: Number(invoice?.total_amount || invoice?.amount || 0),
+      amount_basis: normalizeAmountBasis(invoice?.amount_basis || defaultBasis),
+      notes: String(invoice?.notes || '').trim()
+    };
+  });
+
+  const anyRateMap = buildSaleRateMapAny(db);
+  const results = [];
+  const warnings = presetWarnings.slice();
+
+  const partyRateMapCache = new Map();
+  const getPartyRateMap = (partyId) => {
+    if (!partyRateMapCache.has(partyId)) {
+      partyRateMapCache.set(partyId, buildSaleRateMapForParty(db, partyId));
+    }
+    return partyRateMapCache.get(partyId);
+  };
+
+  const txn = db.transaction(() => {
+    invoices
+      .slice()
+      .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+      .forEach((invoice) => {
+        const invoicePartyId = Number(invoice.party_id || 0);
+        const partyId =
+          Number.isFinite(invoicePartyId) && invoicePartyId > 0 ? invoicePartyId : Number(partyIds[0] || 0);
+        if (!Number.isFinite(partyId) || partyId <= 0) {
+          throw new Error('At least one party is required.');
+        }
+        const partyRateMap = getPartyRateMap(partyId);
+          const purchaseItemIds = listPurchaseItemIdsAsOf(db, invoice.date);
+          const poolBase = Array.from(itemsById.keys()).filter((id) => !excludeSet.has(id));
+          const purchasePool = poolBase.filter((id) => purchaseItemIds.has(id));
+          const pool = purchasePool.length ? purchasePool : poolBase;
+
+          const seed = hashSeed(`${partyId}-${invoice.date}-${invoice.invoice_no || invoice.index}`);
+          const rng = createSeededRng(seed);
+          const selected = new Set();
+
+          includeSet.forEach((id) => {
+            if (itemsById.has(id) && !excludeSet.has(id)) selected.add(id);
+          });
+
+          const useTarget = Number.isFinite(invoice.total_amount) && invoice.total_amount > 0;
+          let maxAllowedByBudget = pool.length;
+          if (useTarget && pool.length) {
+            let minUnitAmount = Infinity;
+            pool.forEach((itemId) => {
+              const item = itemsById.get(itemId);
+              const baseRate =
+                partyRateMap.get(itemId) ||
+                anyRateMap.get(itemId) ||
+                Number(item?.base_rate || 0);
+              const rate = Number.isFinite(baseRate) && baseRate > 0 ? baseRate : 1;
+              const unitFactor = invoice.amount_basis === 'post_tax' ? 1 + Number(item?.gst_rate || 0) / 100 : 1;
+              const unitAmount = Math.max(0.01, rate * unitFactor);
+              if (unitAmount < minUnitAmount) minUnitAmount = unitAmount;
+            });
+            if (Number.isFinite(minUnitAmount) && minUnitAmount > 0) {
+              const affordable = Math.floor(invoice.total_amount / minUnitAmount);
+              maxAllowedByBudget = Math.max(1, Math.min(pool.length, affordable));
+            }
+          }
+
+          const baseMinNeeded = Math.max(Math.min(minItems, pool.length), selected.size);
+          const minNeeded = Math.max(selected.size, Math.min(baseMinNeeded, maxAllowedByBudget));
+          const maxAllowed = Math.max(minNeeded, Math.min(maxItems, pool.length, maxAllowedByBudget));
+          const targetItemCount =
+            maxAllowed > minNeeded ? minNeeded + Math.floor(rng() * (maxAllowed - minNeeded + 1)) : minNeeded;
+
+          if (selected.size < targetItemCount) {
+            const remaining = pool.filter((id) => !selected.has(id));
+            const needed = Math.min(targetItemCount - selected.size, remaining.length);
+            sampleWithoutReplacement(remaining, needed, rng).forEach((id) => selected.add(id));
+          }
+
+          const selectedIds = Array.from(selected.values());
+          if (!selectedIds.length) {
+            throw new Error(`No candidate items found for invoice ${invoice.invoice_no || invoice.index + 1}.`);
+          }
+
+          const lines = selectedIds.map((itemId) => {
+            const item = itemsById.get(itemId);
+            const baseRate =
+              partyRateMap.get(itemId) ||
+              anyRateMap.get(itemId) ||
+              Number(item?.base_rate || 0);
+            const rate = Number.isFinite(baseRate) && baseRate > 0 ? baseRate : 1;
+            const batchList = listBatchAvailabilityAsOf(db, itemId, invoice.date);
+            const batch = batchList.length ? batchList[0] : null;
+
+            return {
+              item_id: itemId,
+              unit_id: item?.base_unit_id ?? null,
+              hsn: item?.hsn || '',
+              batch_no: batch?.batch_no || '',
+              expiry_date: batch?.expiry_date || null,
+              mrp: batch?.mrp || null,
+              gst_rate: Number(item?.gst_rate || 0),
+              rate,
+              qty: 1,
+              _available_qty: Number(batch?.available_qty ?? 0)
+            };
+          });
+
+          if (useTarget) {
+            let remaining = invoice.total_amount;
+            let remainingCount = lines.length;
+            lines.forEach((line, idx) => {
+              const unitFactor = invoice.amount_basis === 'post_tax' ? 1 + line.gst_rate / 100 : 1;
+              const unitAmount = Math.max(0.01, line.rate * unitFactor);
+              if (idx < lines.length - 1) {
+                const desired = remaining / remainingCount;
+                let qty = Math.floor(desired / unitAmount);
+                if (!Number.isFinite(qty) || qty < 1) qty = 1;
+                line.qty = qty;
+                remaining -= unitAmount * qty;
+                remainingCount -= 1;
+              } else {
+                let qty = Math.round(remaining / unitAmount);
+                if (!Number.isFinite(qty) || qty < 1) qty = 1;
+                line.qty = qty;
+              }
+            });
+
+            const currentTotal = computeInvoiceTotal(lines, invoice.amount_basis);
+            const delta = invoice.total_amount - currentTotal;
+            if (Math.abs(delta) > 0.01) {
+              const last = lines[lines.length - 1];
+              const unitFactor = invoice.amount_basis === 'post_tax' ? 1 + last.gst_rate / 100 : 1;
+              const denom = Math.max(1, last.qty) * unitFactor;
+              const neededChange = delta / denom;
+              const baseRate = Number(last.rate || 0);
+              const minRate = baseRate * (1 - maxVariance);
+              const maxRate = baseRate * (1 + maxVariance);
+              let nextRate = baseRate + neededChange;
+              if (!Number.isFinite(nextRate) || baseRate <= 0) {
+                nextRate = baseRate || 1;
+              }
+              if (nextRate < minRate) nextRate = minRate;
+              if (nextRate > maxRate) nextRate = maxRate;
+              last.rate = Number(nextRate.toFixed(2));
+            }
+
+            const finalTotal = computeInvoiceTotal(lines, invoice.amount_basis);
+            if (Math.abs(invoice.total_amount - finalTotal) > 1) {
+              warnings.push({
+                invoice_no: invoice.invoice_no || null,
+                party_id: partyId,
+                date: invoice.date,
+                message: `Invoice total mismatch: target ${invoice.total_amount.toFixed(
+                  2
+                )} vs generated ${finalTotal.toFixed(2)}`
+              });
+            }
+          }
+
+          lines.forEach((line) => {
+            if (line._available_qty < line.qty) {
+              warnings.push({
+                invoice_no: invoice.invoice_no || null,
+                party_id: partyId,
+                date: invoice.date,
+                message: `Negative stock for item ${line.item_id} batch ${line.batch_no || 'N/A'}`
+              });
+            }
+            delete line._available_qty;
+          });
+
+          const created = createOrder({
+            order_type: 'sale',
+            party_id: partyId,
+            order_date: invoice.date,
+            invoice_no: invoice.invoice_no,
+            notes: invoice.notes,
+            balance_amount: 0,
+            apply_round_off: true,
+            items: lines
+          });
+          const baseAmount = Number(computeInvoiceTotal(lines, invoice.amount_basis).toFixed(2));
+          const generatedAmount = roundOffAmount(baseAmount);
+
+          results.push({
+            id: created?.id ?? null,
+            party_id: partyId,
+            invoice_no: invoice.invoice_no || null,
+            date: invoice.date,
+            items_count: lines.length,
+            amount: generatedAmount,
+            amount_basis: invoice.amount_basis
+          });
+      });
+  });
+
+  txn();
+  return { created: results, skipped, warnings };
+}
+
 function resolveTaxCodeIdByRate(db, rateValue, isInterState) {
   const rate = Number(rateValue || 0);
   if (!Number.isFinite(rate) || rate <= 0) return null;
@@ -1563,19 +2867,20 @@ function resolveTaxCodeIdByRate(db, rateValue, isInterState) {
 function createOrder(order) {
   const db = getDb();
   const txnType = order.order_type === 'purchase' ? 3 : 1;
+  const applyRoundOff = txnType === 1 && Boolean(order.apply_round_off);
 
   const insertOrder = db.prepare(
     `INSERT INTO kb_transactions (
         txn_type, txn_name_id, txn_date, txn_ref_number_char, txn_description,
         txn_place_of_supply,
         txn_status, txn_payment_status, txn_tax_inclusive, txn_time,
-        txn_cash_amount, txn_balance_amount
+        txn_cash_amount, txn_balance_amount, txn_round_off_amount
      )
      VALUES (
         @txn_type, @txn_name_id, @txn_date, @txn_ref_number_char, @txn_description,
         @txn_place_of_supply,
         1, 1, 2, @txn_time,
-        @txn_cash_amount, @txn_balance_amount
+        @txn_cash_amount, @txn_balance_amount, @txn_round_off_amount
      )`
   );
   const insertLine = db.prepare(
@@ -1618,10 +2923,18 @@ function createOrder(order) {
       const baseAmount = qty * rate;
       return sum + baseAmount * (1 + gstRate / 100);
     }, 0);
+    let roundOffAmount = 0;
+    let effectiveTotal = invoiceTotal;
+    if (applyRoundOff) {
+      const decimal = effectiveTotal - Math.floor(effectiveTotal);
+      const rounded = decimal > 0.5 ? Math.ceil(effectiveTotal) : Math.floor(effectiveTotal);
+      roundOffAmount = Number((rounded - effectiveTotal).toFixed(2));
+      effectiveTotal = rounded;
+    }
     const requestedBalanceRaw = Number(payload.balance_amount || 0);
     const requestedBalance = Number.isFinite(requestedBalanceRaw) ? requestedBalanceRaw : 0;
-    const clampedBalance = Math.min(Math.max(requestedBalance, 0), invoiceTotal);
-    const cashAmount = invoiceTotal - clampedBalance;
+    const clampedBalance = Math.min(Math.max(requestedBalance, 0), effectiveTotal);
+    const cashAmount = effectiveTotal - clampedBalance;
     const companyState =
       (db.prepare('SELECT firm_state FROM kb_firms ORDER BY firm_id DESC LIMIT 1').get() || {}).firm_state || '';
     const partyState =
@@ -1645,7 +2958,8 @@ function createOrder(order) {
       txn_place_of_supply: placeOfSupply,
       txn_time: 0,
       txn_cash_amount: cashAmount,
-      txn_balance_amount: clampedBalance
+      txn_balance_amount: clampedBalance,
+      txn_round_off_amount: roundOffAmount
     });
     const orderId = info.lastInsertRowid;
 
@@ -1713,7 +3027,7 @@ function createOrder(order) {
         lineitem_unit_id: hasUnitId ? resolvedUnitIdNum : null,
         lineitem_ist_id: hasIstId ? lineIstId : null,
         lineitem_batch_number: item.batch_no || null,
-        lineitem_expiry_date: item.expiry_date || null,
+        lineitem_expiry_date: normalizeExpiryMonthValue(item.expiry_date),
         lineitem_mrp: item.mrp !== undefined && item.mrp !== null ? Number(item.mrp || 0) : null
       });
       } catch (e) {
@@ -1811,9 +3125,11 @@ function importPurchaseBillFromOcr(payload) {
      WHERE name_id = @party_id`
   );
 
-  const findItemById = db.prepare('SELECT item_id FROM kb_items WHERE item_id = ? LIMIT 1');
+  const findItemById = db.prepare(
+    'SELECT item_id, item_sale_unit_price FROM kb_items WHERE item_id = ? LIMIT 1'
+  );
   const findItemByName = db.prepare(
-    `SELECT item_id
+    `SELECT item_id, item_sale_unit_price
      FROM kb_items
      WHERE lower(trim(item_name)) = lower(trim(?))
      LIMIT 1`
@@ -2059,7 +3375,7 @@ function importPurchaseBillFromOcr(payload) {
         unit_id: line.unit_id ?? null,
         hsn,
         batch_no: normalizeBatchValue(line.batch_no || line.batch || ''),
-        expiry_date: normalizeDateValue(line.expiry_date || line.expiry || ''),
+        expiry_date: normalizeExpiryMonthValue(line.expiry_date || line.expiry || ''),
         mrp: line.mrp ?? null,
         gst_rate: Number.isFinite(gstRate) ? gstRate : 0,
         qty,
@@ -2125,9 +3441,11 @@ function importSaleBillFromOcr(payload) {
      WHERE name_id = @party_id`
   );
 
-  const findItemById = db.prepare('SELECT item_id FROM kb_items WHERE item_id = ? LIMIT 1');
+  const findItemById = db.prepare(
+    'SELECT item_id, item_sale_unit_price FROM kb_items WHERE item_id = ? LIMIT 1'
+  );
   const findItemByName = db.prepare(
-    `SELECT item_id
+    `SELECT item_id, item_sale_unit_price
      FROM kb_items
      WHERE lower(trim(item_name)) = lower(trim(?))
      LIMIT 1`
@@ -2246,23 +3564,50 @@ function importSaleBillFromOcr(payload) {
       });
     }
 
+    const partyRateByItemId = new Map();
+    listPartyRatesForOrder(partyId, 'sale').forEach((row) => {
+      const itemId = Number(row?.item_id);
+      const rate = Number(row?.rate || 0);
+      if (!Number.isFinite(itemId) || itemId <= 0) return;
+      if (!Number.isFinite(rate) || rate <= 0) return;
+      partyRateByItemId.set(itemId, rate);
+    });
+
     const normalizedItems = rawItems.map((line) => {
       const qty = Number(line.qty ?? line.quantity ?? 0);
       const amount = Number(line.amount ?? line.total_amount ?? 0);
       const fallbackRate = qty > 0 && amount > 0 ? amount / qty : 0;
-      const rate = Number(line.rate ?? line.priceperunit ?? fallbackRate ?? 0);
+      let rate = Number(line.rate ?? line.priceperunit ?? fallbackRate ?? 0);
       const gstRate = Number(line.gst_rate ?? line.gst ?? line.tax_rate ?? 0);
       const hsn = String(line.hsn || line.hsn_sac_code || '').trim();
       const itemName = String(line.item_name || line.name || '').trim();
       const itemIdRaw = line.item_id ?? line.id ?? null;
       let itemId = null;
+      let matchedItem = null;
       if (itemIdRaw !== null && itemIdRaw !== undefined) {
         const foundById = findItemById.get(Number(itemIdRaw));
-        if (foundById) itemId = Number(foundById.item_id);
+        if (foundById) {
+          itemId = Number(foundById.item_id);
+          matchedItem = foundById;
+        }
       }
       if (!itemId && itemName) {
         const foundByName = findItemByName.get(itemName);
-        if (foundByName) itemId = Number(foundByName.item_id);
+        if (foundByName) {
+          itemId = Number(foundByName.item_id);
+          matchedItem = foundByName;
+        }
+      }
+      if ((!Number.isFinite(rate) || rate <= 0) && itemId) {
+        const partyRate = Number(partyRateByItemId.get(itemId) || 0);
+        if (Number.isFinite(partyRate) && partyRate > 0) {
+          rate = partyRate;
+        } else {
+          const itemSaleRate = Number(matchedItem?.item_sale_unit_price || 0);
+          if (Number.isFinite(itemSaleRate) && itemSaleRate > 0) {
+            rate = itemSaleRate;
+          }
+        }
       }
       if (!itemId) {
         if (!itemName) {
@@ -2298,7 +3643,7 @@ function importSaleBillFromOcr(payload) {
         unit_id: line.unit_id ?? null,
         hsn,
         batch_no: normalizeBatchValue(line.batch_no || line.batch || ''),
-        expiry_date: normalizeDateValue(line.expiry_date || line.expiry || ''),
+        expiry_date: normalizeExpiryMonthValue(line.expiry_date || line.expiry || ''),
         mrp: line.mrp ?? null,
         gst_rate: Number.isFinite(gstRate) ? gstRate : 0,
         qty,
@@ -2316,6 +3661,7 @@ function importSaleBillFromOcr(payload) {
       notes: String(rawBill?.notes || payload?.notes || '').trim(),
       place_of_supply: placeOfSupply,
       balance_amount: Number(rawBill?.balance_amount ?? payload?.balance_amount ?? 0),
+      apply_round_off: Boolean(payload?.apply_round_off),
       items: normalizedItems
     };
     if (!orderPayload.order_date) {
@@ -2640,6 +3986,182 @@ function getOrdersDiagnostics() {
   return { total, byType, sample, withParties };
 }
 
+function getSnapshotDir() {
+  const userDataDir =
+    app && typeof app.getPath === 'function'
+      ? app.getPath('userData')
+      : path.join(os.homedir(), 'Library', 'Application Support', 'vyapar-clone');
+  const dir = path.join(userDataDir, 'snapshots');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function getSnapshotMetaPath() {
+  return path.join(getSnapshotDir(), 'snapshots.json');
+}
+
+function readSnapshotMeta() {
+  const metaPath = getSnapshotMetaPath();
+  if (!fs.existsSync(metaPath)) return [];
+  try {
+    return JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+  } catch (_err) {
+    return [];
+  }
+}
+
+function writeSnapshotMeta(entries) {
+  fs.writeFileSync(getSnapshotMetaPath(), JSON.stringify(entries, null, 2), 'utf8');
+}
+
+const MAX_AUTO_SNAPSHOTS = 50;
+
+function createSnapshot(label, action, isAuto) {
+  const database = getDb();
+  const dir = getSnapshotDir();
+  const now = new Date();
+  const ts = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(
+    now.getDate()
+  ).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(
+    now.getMinutes()
+  ).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`;
+  const safeName = String(action || 'manual')
+    .replace(/[^a-zA-Z0-9_]/g, '_')
+    .substring(0, 40);
+  const id = `snap_${ts}_${Date.now() % 10000}`;
+  const filename = `${id}_${safeName}.db`;
+  const filePath = path.join(dir, filename);
+
+  database.exec('PRAGMA wal_checkpoint(FULL)');
+  const escaped = filePath.replace(/'/g, "''");
+  database.exec(`VACUUM INTO '${escaped}'`);
+
+  let sizeBytes = 0;
+  try {
+    sizeBytes = fs.statSync(filePath).size;
+  } catch (_err) {
+    /* ignore */
+  }
+
+  const entry = {
+    id,
+    label: String(label || '').trim() || (isAuto ? `Before: ${action}` : 'Manual snapshot'),
+    action: String(action || '').trim(),
+    auto: !!isAuto,
+    timestamp: now.toISOString(),
+    filename,
+    size_bytes: sizeBytes
+  };
+
+  const meta = readSnapshotMeta();
+  meta.push(entry);
+
+  // Enforce retention for auto-snapshots
+  if (isAuto) {
+    const autoEntries = meta.filter((e) => e.auto);
+    if (autoEntries.length > MAX_AUTO_SNAPSHOTS) {
+      const toRemove = autoEntries
+        .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+        .slice(0, autoEntries.length - MAX_AUTO_SNAPSHOTS);
+      const removeIds = new Set(toRemove.map((e) => e.id));
+      toRemove.forEach((e) => {
+        const fp = path.join(dir, e.filename);
+        try {
+          if (fs.existsSync(fp)) fs.unlinkSync(fp);
+        } catch (_err) {
+          /* ignore */
+        }
+      });
+      const pruned = meta.filter((e) => !removeIds.has(e.id));
+      writeSnapshotMeta(pruned);
+      return entry;
+    }
+  }
+
+  writeSnapshotMeta(meta);
+  return entry;
+}
+
+function listSnapshots() {
+  const dir = getSnapshotDir();
+  const meta = readSnapshotMeta();
+  return meta
+    .filter((e) => {
+      const fp = path.join(dir, e.filename);
+      return fs.existsSync(fp);
+    })
+    .map((e) => {
+      const fp = path.join(dir, e.filename);
+      let sizeBytes = e.size_bytes || 0;
+      try {
+        sizeBytes = fs.statSync(fp).size;
+      } catch (_err) {
+        /* ignore */
+      }
+      return { ...e, size_bytes: sizeBytes };
+    })
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+}
+
+function deleteSnapshot(snapshotId) {
+  const dir = getSnapshotDir();
+  const meta = readSnapshotMeta();
+  const entry = meta.find((e) => e.id === snapshotId);
+  if (!entry) throw new Error('Snapshot not found.');
+  const fp = path.join(dir, entry.filename);
+  try {
+    if (fs.existsSync(fp)) fs.unlinkSync(fp);
+  } catch (_err) {
+    /* ignore */
+  }
+  writeSnapshotMeta(meta.filter((e) => e.id !== snapshotId));
+  return { ok: true };
+}
+
+function rollbackToSnapshot(snapshotId) {
+  const dir = getSnapshotDir();
+  const meta = readSnapshotMeta();
+  const entry = meta.find((e) => e.id === snapshotId);
+  if (!entry) throw new Error('Snapshot not found.');
+  const snapshotPath = path.join(dir, entry.filename);
+  if (!fs.existsSync(snapshotPath)) throw new Error('Snapshot file missing on disk.');
+
+  // Safety snapshot before rollback
+  createSnapshot('Before rollback', 'rollback', true);
+
+  // Close current DB
+  const dbPath = currentDbPath || resolveDbPath();
+  if (db) {
+    try {
+      db.close();
+    } catch (_err) {
+      /* ignore */
+    }
+    db = null;
+  }
+
+  // Replace the live DB with the snapshot
+  fs.copyFileSync(snapshotPath, dbPath);
+  // Remove WAL / SHM if present
+  const walPath = `${dbPath}-wal`;
+  const shmPath = `${dbPath}-shm`;
+  try {
+    if (fs.existsSync(walPath)) fs.unlinkSync(walPath);
+  } catch (_err) {
+    /* ignore */
+  }
+  try {
+    if (fs.existsSync(shmPath)) fs.unlinkSync(shmPath);
+  } catch (_err) {
+    /* ignore */
+  }
+
+  // Re-open the DB
+  getDb();
+
+  return { ok: true, restored: entry };
+}
+
 module.exports = {
   listCompanies,
   upsertCompany,
@@ -2650,6 +4172,7 @@ module.exports = {
   listUnits,
   listTaxCodes,
   upsertItem,
+  updateItemName,
   listBatches,
   listBatchAvailability,
   exportDatabase,
@@ -2659,15 +4182,23 @@ module.exports = {
   upsertPartyRate,
   listOrders,
   listGstr1SalesReport,
+  buildGstr1FullReport,
   getOrder,
   listOrderItems,
   createOrder,
   updateOrder,
   deleteOrder,
+  bulkGenerateSalesOrders,
   importPurchaseBillFromOcr,
   importSaleBillFromOcr,
   importFromVyaparDump,
   importFromVyaparSqlite,
   getDbInfo,
-  getOrdersDiagnostics
+  getOrdersDiagnostics,
+  createSnapshot,
+  listSnapshots,
+  deleteSnapshot,
+  rollbackToSnapshot,
+  updateParty,
+  updateItem
 };

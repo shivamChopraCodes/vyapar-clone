@@ -11,12 +11,32 @@ function formatDate(value) {
   return raw;
 }
 
+function formatExpiryMonthYear(value) {
+  if (!value) return '';
+  const raw = String(value).trim();
+  const isoMatch = raw.match(/^(\d{4})-(\d{2})(?:-(\d{2}))?/);
+  if (isoMatch) return `${isoMatch[2]}/${isoMatch[1]}`;
+  const slashMonthMatch = raw.match(/^(\d{2})\/(\d{4})$/);
+  if (slashMonthMatch) return `${slashMonthMatch[1]}/${slashMonthMatch[2]}`;
+  const date = new Date(raw);
+  if (!Number.isNaN(date.getTime())) {
+    const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const yyyy = String(date.getUTCFullYear());
+    return `${mm}/${yyyy}`;
+  }
+  return raw;
+}
+
 function formatCurrency(amount) {
   if (amount == null || isNaN(amount)) return '';
   return `₹ ${Number(amount).toFixed(2)}`;
 }
 
 export default function InvoicePrint({ company, party, order, orderItems, totals, itemMap }) {
+  const displayInvoiceNo = String(
+    order?.invoice_no || order?.ref_number || order?.id || ''
+  ).trim();
+
   const partyCustomProperties = useMemo(() => {
     if (!party?.extra_properties || typeof party.extra_properties !== 'object') return [];
     return Object.entries(party.extra_properties).filter(([key, value]) => {
@@ -38,7 +58,7 @@ export default function InvoicePrint({ company, party, order, orderItems, totals
         name: item?.name || 'Item',
         hsn: line.hsn || item?.hsn || '',
         batch: line.batch_no || '',
-        expiry: line.expiry_date || '',
+        expiry: formatExpiryMonthYear(line.expiry_date || ''),
         mrp: line.mrp ?? '',
         qty,
         unit: line.unit || item?.base_unit || '',
@@ -49,6 +69,15 @@ export default function InvoicePrint({ company, party, order, orderItems, totals
       };
     });
   }, [orderItems, itemMap]);
+
+  const hasMrpColumn = useMemo(
+    () => rows.some((row) => row.mrp !== '' && row.mrp !== null && Number(row.mrp) !== 0),
+    [rows]
+  );
+  const hasExpiryColumn = useMemo(
+    () => rows.some((row) => row.expiry && String(row.expiry).trim() !== ''),
+    [rows]
+  );
 
   const emptyRowCount = Math.max(0, MAX_ROWS - rows.length);
 
@@ -105,7 +134,7 @@ export default function InvoicePrint({ company, party, order, orderItems, totals
           </div>
           <div className="inv-invoice-details">
             <p className="inv-section-label">Invoice Details</p>
-            <p>Invoice No. : {order?.id || ''}</p>
+            <p>Invoice No. : {displayInvoiceNo}</p>
             <p>Date : {formatDate(order?.order_date)}</p>
             {order?.place_of_supply && <p>Place of Supply : {order.place_of_supply}</p>}
           </div>
@@ -119,8 +148,8 @@ export default function InvoicePrint({ company, party, order, orderItems, totals
               <th className="col-item">Item name</th>
               <th className="col-hsn">HSN/SAC</th>
               <th className="col-batch">Batch No.</th>
-              <th className="col-expiry">Exp. Date</th>
-              <th className="col-mrp text-right">MRP</th>
+              {hasExpiryColumn && <th className="col-expiry">Exp. Date</th>}
+              {hasMrpColumn && <th className="col-mrp text-right">MRP</th>}
               <th className="col-qty text-right">Qty</th>
               <th className="col-unit">Unit</th>
               <th className="col-price text-right">Price/unit</th>
@@ -135,8 +164,10 @@ export default function InvoicePrint({ company, party, order, orderItems, totals
                 <td>{row.name}</td>
                 <td>{row.hsn}</td>
                 <td>{row.batch}</td>
-                <td>{row.expiry}</td>
-                <td className="text-right">{row.mrp !== '' ? formatCurrency(row.mrp) : ''}</td>
+                {hasExpiryColumn && <td>{row.expiry}</td>}
+                {hasMrpColumn && (
+                  <td className="text-right">{row.mrp !== '' ? formatCurrency(row.mrp) : ''}</td>
+                )}
                 <td className="text-right">{row.qty}</td>
                 <td>{row.unit}</td>
                 <td className="text-right">{formatCurrency(row.price)}</td>
@@ -154,8 +185,8 @@ export default function InvoicePrint({ company, party, order, orderItems, totals
                 <td>&nbsp;</td>
                 <td>&nbsp;</td>
                 <td>&nbsp;</td>
-                <td>&nbsp;</td>
-                <td>&nbsp;</td>
+                {hasExpiryColumn && <td>&nbsp;</td>}
+                {hasMrpColumn && <td>&nbsp;</td>}
                 <td>&nbsp;</td>
                 <td>&nbsp;</td>
                 <td>&nbsp;</td>
@@ -169,8 +200,8 @@ export default function InvoicePrint({ company, party, order, orderItems, totals
               <td colSpan={2}><strong>Total</strong></td>
               <td></td>
               <td></td>
-              <td></td>
-              <td></td>
+              {hasExpiryColumn && <td></td>}
+              {hasMrpColumn && <td></td>}
               <td className="text-right"><strong>{totalQty}</strong></td>
               <td></td>
               <td></td>

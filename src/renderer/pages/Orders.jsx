@@ -299,6 +299,11 @@ export default function Orders({ mode = 'sale' }) {
           >
             Import from Invoice
           </Button>
+          {!isPurchaseMode && (
+            <Button type="button" variant="outline" onClick={() => navigate('/sales/bulk')}>
+              Bulk Generate
+            </Button>
+          )}
           <Button type="button" onClick={() => navigate(createPath)}>
             {isPurchaseMode ? '+ Add Purchase' : '+ Add Sale'}
           </Button>

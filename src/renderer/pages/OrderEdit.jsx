@@ -38,6 +38,30 @@ const toInputDate = (value) => {
   return '';
 };
 
+const toExpiryMonthValue = (value) => {
+  if (!value) return '';
+  const raw = String(value).trim();
+  const monthMatch = raw.match(/^(\d{4})-(\d{2})(?:-\d{2})?/);
+  if (monthMatch) return `${monthMatch[2]}/${monthMatch[1]}`;
+  const slashMatch = raw.match(/^(\d{1,2})\/(\d{4})$/);
+  if (slashMatch) {
+    const mm = String(Math.max(1, Math.min(12, Number(slashMatch[1])))).padStart(2, '0');
+    return `${mm}/${slashMatch[2]}`;
+  }
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return '';
+  const yyyy = date.getUTCFullYear();
+  const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+  return `${mm}/${yyyy}`;
+};
+
+const toExpiryMonthInputValue = (value) => {
+  const mmYyyy = toExpiryMonthValue(value);
+  const match = mmYyyy.match(/^(\d{2})\/(\d{4})$/);
+  if (!match) return '';
+  return `${match[2]}-${match[1]}`;
+};
+
 export default function OrderEdit({ forcedOrderType = null }) {
   const navigate = useNavigate();
   const { orderId } = useParams();
@@ -52,6 +76,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
   const [notes, setNotes] = useState('');
   const [balanceAmount, setBalanceAmount] = useState('0');
   const [useWholeAmountAsBalance, setUseWholeAmountAsBalance] = useState(false);
+  const [applyRoundOff, setApplyRoundOff] = useState(false);
   const [items, setItems] = useState([]);
   const [units, setUnits] = useState([]);
   const [parties, setParties] = useState([]);
@@ -61,6 +86,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
   const [lineForm, setLineForm] = useState(emptyLine);
   const [company, setCompany] = useState(null);
   const [batchOptionsByItemId, setBatchOptionsByItemId] = useState({});
+  const [itemNameDrafts, setItemNameDrafts] = useState({});
   const effectiveOrderType = forcedType || orderType;
   const listPath = effectiveOrderType === 'purchase' ? '/purchase' : '/sales';
 
@@ -103,6 +129,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
     setOrderDate(toInputDate(order.order_date));
     setNotes(order.notes || '');
     setBalanceAmount(String(Number(order.balance_amount || 0)));
+    setApplyRoundOff(Number(order.round_off_amount || 0) !== 0);
     setOrderItems(
       (lines || []).map((line) => ({
         item_id: String(line.item_id),
@@ -116,7 +143,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
           itemData.find((item) => String(item.id) === String(line.item_id))?.base_unit ||
           '',
         batch_no: line.batch_no || '',
-        expiry_date: line.expiry_date || '',
+        expiry_date: toExpiryMonthValue(line.expiry_date || ''),
         mrp: line.mrp ?? '',
         qty: Number(line.qty || 0),
         rate: Number(line.rate || 0),
@@ -224,12 +251,31 @@ export default function OrderEdit({ forcedOrderType = null }) {
       }));
       return;
     }
+    if (field === 'batch_no') {
+      setLineForm((prev) => {
+        const next = { ...prev, batch_no: value };
+        const batches = batchOptionsByItemId[String(prev.item_id || '')] || [];
+        const matched = batches.find((batch) => String(batch.batch_no || '') === String(value || ''));
+        if (matched) {
+          if (!next.expiry_date) next.expiry_date = toExpiryMonthValue(matched.expiry_date || '');
+          if (!next.mrp && matched.mrp !== undefined && matched.mrp !== null) {
+            next.mrp = matched.mrp;
+          }
+        }
+        return next;
+      });
+      return;
+    }
     if (field === 'unit_id') {
       setLineForm((prev) => ({
         ...prev,
         unit_id: value ? Number(value) : null,
         unit: value ? unitMap.get(String(value)) || '' : ''
       }));
+      return;
+    }
+    if (field === 'expiry_date') {
+      setLineForm((prev) => ({ ...prev, expiry_date: toExpiryMonthValue(value) }));
       return;
     }
     setLineForm((prev) => ({ ...prev, [field]: value }));
@@ -277,6 +323,36 @@ export default function OrderEdit({ forcedOrderType = null }) {
     setOrderItems((prev) => {
       const next = [...prev];
       const line = { ...next[index], [field]: value };
+      if (field === 'item_id') {
+        const item = itemMap.get(String(value));
+        const partyRate = partyRateByItemId.get(String(value));
+        const nextUnitId = item?.base_unit_id ?? null;
+        line.item_id = String(value || '');
+        line.hsn = item?.hsn || '';
+        line.unit_id = nextUnitId;
+        line.unit = nextUnitId !== null ? unitMap.get(String(nextUnitId)) || item?.base_unit || '' : '';
+        line.gst_rate = item?.gst_rate ?? '';
+        line.rate =
+          partyRate !== undefined && partyRate !== null
+            ? partyRate
+            : item?.base_rate ?? line.rate;
+        line.batch_no = '';
+        line.expiry_date = '';
+        line.mrp = '';
+      }
+      if (field === 'batch_no') {
+        const batches = batchOptionsByItemId[String(line.item_id || '')] || [];
+        const matched = batches.find((batch) => String(batch.batch_no || '') === String(value || ''));
+        if (matched) {
+          if (!line.expiry_date) line.expiry_date = toExpiryMonthValue(matched.expiry_date || '');
+          if (!line.mrp && matched.mrp !== undefined && matched.mrp !== null) {
+            line.mrp = matched.mrp;
+          }
+        }
+      }
+      if (field === 'expiry_date') {
+        line.expiry_date = toExpiryMonthValue(value);
+      }
       if (field === 'unit_id') {
         line.unit_id = value ? Number(value) : null;
         line.unit = value ? unitMap.get(String(value)) || '' : '';
@@ -315,7 +391,8 @@ export default function OrderEdit({ forcedOrderType = null }) {
         gst_rate: Number(line.gst_rate || 0),
         qty: Number(line.qty || 0),
         rate: Number(line.rate || 0)
-      }))
+      })),
+      apply_round_off: effectiveOrderType === 'sale' ? applyRoundOff : false
     };
     if (isEditMode) {
       await window.vyapar.updateOrder(orderId, payload);
@@ -344,11 +421,20 @@ export default function OrderEdit({ forcedOrderType = null }) {
     );
   }, [orderItems]);
 
+  const roundOffAmount = useMemo(() => {
+    if (!applyRoundOff || effectiveOrderType !== 'sale') return 0;
+    const decimal = totals.invoiceTotal - Math.floor(totals.invoiceTotal);
+    const rounded = decimal > 0.5 ? Math.ceil(totals.invoiceTotal) : Math.floor(totals.invoiceTotal);
+    return Number((rounded - totals.invoiceTotal).toFixed(2));
+  }, [applyRoundOff, effectiveOrderType, totals.invoiceTotal]);
+
+  const displayedInvoiceTotal = totals.invoiceTotal + roundOffAmount;
+
   useEffect(() => {
     if (useWholeAmountAsBalance) {
-      setBalanceAmount(totals.invoiceTotal.toFixed(2));
+      setBalanceAmount(displayedInvoiceTotal.toFixed(2));
     }
-  }, [useWholeAmountAsBalance, totals.invoiceTotal]);
+  }, [useWholeAmountAsBalance, displayedInvoiceTotal]);
 
   useEffect(() => {
     const ids = new Set();
@@ -378,7 +464,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
   }, [lineForm.item_id, orderItems, batchOptionsByItemId]);
 
   const numericBalanceAmount = Number.isFinite(Number(balanceAmount)) ? Number(balanceAmount) : 0;
-  const remainingBalance = Math.max(totals.invoiceTotal - numericBalanceAmount, 0);
+  const remainingBalance = Math.max(displayedInvoiceTotal - numericBalanceAmount, 0);
 
   const orderTypeOptions = useMemo(
     () => [
@@ -406,6 +492,31 @@ export default function OrderEdit({ forcedOrderType = null }) {
     [items]
   );
 
+  const updateItemNameDraft = (itemId, value) => {
+    if (!itemId) return;
+    setItemNameDrafts((prev) => ({ ...prev, [itemId]: value }));
+  };
+
+  const commitItemNameDraft = async (itemId) => {
+    if (!itemId) return;
+    const draft = String(itemNameDrafts[itemId] ?? '').trim();
+    const current = itemMap.get(String(itemId))?.name || '';
+    if (!draft || draft === current) return;
+    try {
+      const updated = await window.vyapar.updateItemName(Number(itemId), draft);
+      if (updated) {
+        setItems((prev) => prev.map((item) => (String(item.id) === String(updated.id) ? updated : item)));
+      }
+      setItemNameDrafts((prev) => {
+        const next = { ...prev };
+        delete next[itemId];
+        return next;
+      });
+    } catch (error) {
+      window.alert(error?.message || 'Failed to update item name.');
+    }
+  };
+
   const unitOptions = useMemo(
     () =>
       units.map((unit) => ({
@@ -424,6 +535,23 @@ export default function OrderEdit({ forcedOrderType = null }) {
     [gstRates, gstLabelByRate]
   );
   const lineFormBatchOptions = batchOptionsByItemId[String(lineForm.item_id || '')] || [];
+  const sortBatchesForSale = (batches) => {
+    const copy = [...(batches || [])];
+    if (effectiveOrderType !== 'sale') return copy;
+    return copy.sort((a, b) => {
+      const aAvail = Number(a.available_qty || 0);
+      const bAvail = Number(b.available_qty || 0);
+      const aPos = aAvail > 0;
+      const bPos = bAvail > 0;
+      if (aPos !== bPos) return aPos ? -1 : 1;
+      if (aAvail !== bAvail) return bAvail - aAvail;
+      return String(a.batch_no || '').localeCompare(String(b.batch_no || ''));
+    });
+  };
+  const lineFormBatchOptionsSorted = useMemo(
+    () => sortBatchesForSale(lineFormBatchOptions),
+    [lineFormBatchOptions, effectiveOrderType]
+  );
 
   const selectedParty = useMemo(
     () => parties.find((p) => String(p.id) === partyId) || null,
@@ -433,10 +561,12 @@ export default function OrderEdit({ forcedOrderType = null }) {
   const previewInChrome = async () => {
     const markup = document.querySelector('.invoice-print-wrapper')?.outerHTML || '';
     if (!markup) return;
+    const invoiceNoForFile = String(invoiceNo || orderId || 'NA').trim();
     try {
       await window.vyapar.previewInvoiceInChrome({
         markup,
-        css: invoicePrintCss
+        css: invoicePrintCss,
+        invoice_no: invoiceNoForFile
       });
     } catch (error) {
       window.alert(error?.message || 'Could not open preview in Chrome.');
@@ -448,7 +578,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="order-edit space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="section-title text-3xl font-semibold">
@@ -544,6 +674,16 @@ export default function OrderEdit({ forcedOrderType = null }) {
                 />
                 Use whole invoice amount
               </label>
+              {effectiveOrderType === 'sale' && (
+                <label className="mt-2 flex items-center gap-2 text-sm text-muted">
+                  <input
+                    type="checkbox"
+                    checked={applyRoundOff}
+                    onChange={(event) => setApplyRoundOff(event.target.checked)}
+                  />
+                  Round off final amount
+                </label>
+              )}
               <p className="mt-1 text-xs text-muted">
                 Remaining Balance: {remainingBalance.toFixed(2)}
               </p>
@@ -580,7 +720,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
                 placeholder="BATCH-01"
               />
               <datalist id={`batch-options-${lineForm.item_id || 'new'}`}>
-                {lineFormBatchOptions.map((batch) => (
+                {lineFormBatchOptionsSorted.map((batch) => (
                   <option
                     key={batch.batch_no}
                     value={batch.batch_no}
@@ -591,7 +731,11 @@ export default function OrderEdit({ forcedOrderType = null }) {
             </div>
             <div>
               <Label>Expiry</Label>
-              <Input value={lineForm.expiry_date} onChange={updateLineForm('expiry_date')} placeholder="2026-12" />
+              <Input
+                type="month"
+                value={toExpiryMonthInputValue(lineForm.expiry_date)}
+                onChange={updateLineForm('expiry_date')}
+              />
             </div>
             <div>
               <Label>MRP</Label>
@@ -655,10 +799,38 @@ export default function OrderEdit({ forcedOrderType = null }) {
                   const gstRate = Number(line.gst_rate || 0);
                   const amount = qty * rate;
                   const totalAmount = amount * (1 + gstRate / 100);
+                  const itemNameDraft = itemNameDrafts[line.item_id];
+                  const itemNameValue =
+                    itemNameDraft !== undefined
+                      ? itemNameDraft
+                      : itemMap.get(String(line.item_id))?.name || '';
 
                   return (
                     <TR key={`${line.item_id}-${index}`}>
-                      <TD>{itemMap.get(String(line.item_id))?.name || 'Item'}</TD>
+                      <TD>
+                        <div className="space-y-2">
+                          <SearchableSelect
+                            value={line.item_id}
+                            options={itemOptions}
+                            onChange={updateExistingLine(index, 'item_id')}
+                            placeholder="Search item"
+                          />
+                          <div className="flex items-center gap-2">
+                            <Input
+                              value={itemNameValue}
+                              onChange={(event) => updateItemNameDraft(line.item_id, event.target.value)}
+                              placeholder="Edit item name"
+                            />
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              onClick={() => commitItemNameDraft(line.item_id)}
+                            >
+                              Save
+                            </Button>
+                          </div>
+                        </div>
+                      </TD>
                       <TD>{line.hsn || itemMap.get(String(line.item_id))?.hsn || '—'}</TD>
                       <TD>
                         <Input
@@ -667,7 +839,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
                           onChange={updateExistingLine(index, 'batch_no')}
                         />
                         <datalist id={`batch-options-${line.item_id}-${index}`}>
-                          {(batchOptionsByItemId[String(line.item_id || '')] || []).map((batch) => (
+                          {sortBatchesForSale(batchOptionsByItemId[String(line.item_id || '')] || []).map((batch) => (
                             <option
                               key={batch.batch_no}
                               value={batch.batch_no}
@@ -677,7 +849,11 @@ export default function OrderEdit({ forcedOrderType = null }) {
                         </datalist>
                       </TD>
                       <TD>
-                        <Input value={line.expiry_date || ''} onChange={updateExistingLine(index, 'expiry_date')} />
+                        <Input
+                          type="month"
+                          value={toExpiryMonthInputValue(line.expiry_date || '')}
+                          onChange={updateExistingLine(index, 'expiry_date')}
+                        />
                       </TD>
                       <TD>
                         <Input value={line.mrp ?? ''} onChange={updateExistingLine(index, 'mrp')} />
@@ -729,7 +905,10 @@ export default function OrderEdit({ forcedOrderType = null }) {
             </div>
             <div className="rounded-lg border border-border bg-muted/20 px-4 py-3">
               <p className="text-muted">Invoice Total</p>
-              <p className="text-base font-semibold">{totals.invoiceTotal.toFixed(2)}</p>
+              <p className="text-base font-semibold">{displayedInvoiceTotal.toFixed(2)}</p>
+              {applyRoundOff && effectiveOrderType === 'sale' && roundOffAmount !== 0 && (
+                <p className="text-xs text-muted">Round off: {roundOffAmount.toFixed(2)}</p>
+              )}
             </div>
           </div>
 
@@ -755,7 +934,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
         <InvoicePrint
           company={company}
           party={selectedParty}
-          order={{ id: orderId, order_date: orderDate, place_of_supply: placeOfSupply }}
+          order={{ id: orderId, invoice_no: invoiceNo, order_date: orderDate, place_of_supply: placeOfSupply }}
           orderItems={orderItems}
           totals={totals}
           itemMap={itemMap}

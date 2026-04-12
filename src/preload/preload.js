@@ -6,12 +6,14 @@ contextBridge.exposeInMainWorld('vyapar', {
 
   listParties: () => ipcRenderer.invoke('party:list'),
   createParty: (payload) => ipcRenderer.invoke('party:create', payload),
+  updateParty: (id, payload) => ipcRenderer.invoke('party:update', id, payload),
 
   listItems: () => ipcRenderer.invoke('item:list'),
   getItemDetails: (itemId) => ipcRenderer.invoke('item:getDetails', itemId),
   listUnits: () => ipcRenderer.invoke('unit:list'),
   listTaxCodes: () => ipcRenderer.invoke('taxCode:list'),
   createItem: (payload) => ipcRenderer.invoke('item:create', payload),
+  updateItemName: (itemId, name) => ipcRenderer.invoke('item:updateName', itemId, name),
 
   listBatches: (itemId) => ipcRenderer.invoke('batch:list', itemId),
   listBatchAvailability: (itemId) => ipcRenderer.invoke('batch:availability', itemId),
@@ -24,11 +26,13 @@ contextBridge.exposeInMainWorld('vyapar', {
 
   listOrders: () => ipcRenderer.invoke('order:list'),
   getGstr1SalesReport: (range) => ipcRenderer.invoke('report:gstr1Sales', range),
+  getGstr1FullReport: (range) => ipcRenderer.invoke('report:gstr1Full', range),
   listOrderItems: (orderId) => ipcRenderer.invoke('order:items', orderId),
   getOrder: (orderId) => ipcRenderer.invoke('order:get', orderId),
   createOrder: (payload) => ipcRenderer.invoke('order:create', payload),
   updateOrder: (orderId, payload) => ipcRenderer.invoke('order:update', orderId, payload),
   deleteOrder: (orderId) => ipcRenderer.invoke('order:delete', orderId),
+  bulkGenerateSalesOrders: (payload) => ipcRenderer.invoke('order:bulkGenerateSales', payload),
   importPurchaseBillOcr: (payload) => ipcRenderer.invoke('order:importPurchaseBillOcr', payload),
   importSaleBillOcr: (payload) => ipcRenderer.invoke('order:importSaleBillOcr', payload),
   processInvoiceImage: (imagePath, engine) => ipcRenderer.invoke('ocr:processImage', imagePath, engine),
@@ -42,5 +46,10 @@ contextBridge.exposeInMainWorld('vyapar', {
   getOrdersDiagnostics: () => ipcRenderer.invoke('debug:orders'),
   getUserDataPath: () => ipcRenderer.invoke('app:userDataPath'),
   importVyaparDump: (dumpPath) => ipcRenderer.invoke('import:vyaparDump', dumpPath),
-  previewInvoiceInChrome: (payload) => ipcRenderer.invoke('invoice:previewChrome', payload)
+  previewInvoiceInChrome: (payload) => ipcRenderer.invoke('invoice:previewChrome', payload),
+
+  createSnapshot: (label) => ipcRenderer.invoke('snapshot:create', label),
+  listSnapshots: () => ipcRenderer.invoke('snapshot:list'),
+  deleteSnapshot: (id) => ipcRenderer.invoke('snapshot:delete', id),
+  rollbackToSnapshot: (id) => ipcRenderer.invoke('snapshot:rollback', id)
 });

@@ -17,6 +17,25 @@ const toNumber = (value) => {
   return Number.isFinite(next) ? next : 0;
 };
 
+const formatCurrency = (value) => `₹ ${toNumber(value).toFixed(2)}`;
+
+const toExpiryMonthValue = (value) => {
+  if (!value) return '';
+  const raw = String(value).trim();
+  const monthMatch = raw.match(/^(\d{4})-(\d{2})(?:-\d{2})?/);
+  if (monthMatch) return `${monthMatch[2]}/${monthMatch[1]}`;
+  const slashMatch = raw.match(/^(\d{1,2})\/(\d{4})$/);
+  if (slashMatch) {
+    const mm = String(Math.max(1, Math.min(12, Number(slashMatch[1])))).padStart(2, '0');
+    return `${mm}/${slashMatch[2]}`;
+  }
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return '';
+  const yyyy = date.getUTCFullYear();
+  const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+  return `${mm}/${yyyy}`;
+};
+
 const confidenceClass = (value) => {
   if (value >= 0.85) return 'ocr-badge ocr-badge-green';
   if (value >= 0.5) return 'ocr-badge ocr-badge-yellow';
@@ -43,8 +62,10 @@ export default function OcrImport() {
   const [manualJson, setManualJson] = useState('');
   const [ocrResult, setOcrResult] = useState(null);
   const [matchResult, setMatchResult] = useState(null);
+  const [applyRoundOff, setApplyRoundOff] = useState(false);
   const [parties, setParties] = useState([]);
   const [items, setItems] = useState([]);
+  const [batchOptionsByItemId, setBatchOptionsByItemId] = useState({});
   const [supplierDraft, setSupplierDraft] = useState({
     party_id: '',
     create_new: false,
@@ -124,18 +145,21 @@ export default function OcrImport() {
       (matched?.item_matches || []).map((match, index) => {
         const source = match?.ocr_item || {};
         const matchedItemId = match?.matched_item?.id ? String(match.matched_item.id) : '';
+        const matchedItem = matchedItemId
+          ? items.find((item) => String(item.id) === matchedItemId)
+          : null;
         return {
           key: `${index}-${source.item_name || 'line'}`,
           confidence: toNumber(match?.confidence),
           selected_item_id: matchedItemId,
           action: match?.action || (matchedItemId ? 'matched' : 'create_new'),
           item_name: source?.item_name || '',
-          hsn: source?.hsn || '',
+          hsn: source?.hsn || matchedItem?.hsn || '',
           qty: toNumber(source?.qty),
           rate: toNumber(source?.rate),
           amount: toNumber(source?.amount),
           batch_no: source?.batch_no || '',
-          expiry_date: source?.expiry_date || '',
+          expiry_date: toExpiryMonthValue(source?.expiry_date || ''),
           mrp: source?.mrp ?? '',
           gst_rate: toNumber(source?.gst_rate),
           pack: source?.pack || '',
@@ -217,14 +241,88 @@ export default function OcrImport() {
         const next = { ...row, [field]: value };
         if (field === 'selected_item_id') {
           next.action = value ? 'matched' : 'create_new';
+          if (value) {
+            const matchedItem = items.find((item) => String(item.id) === String(value));
+            if (matchedItem && !String(next.hsn || '').trim()) {
+              next.hsn = matchedItem.hsn || '';
+            }
+          }
         }
         if (field === 'qty' || field === 'rate') {
           next.amount = toNumber(next.qty) * toNumber(next.rate);
+        }
+        if (field === 'expiry_date') {
+          next.expiry_date = toExpiryMonthValue(value);
         }
         return next;
       })
     );
   };
+
+  useEffect(() => {
+    const ids = new Set();
+    itemDrafts.forEach((row) => {
+      if (row.selected_item_id) ids.add(String(row.selected_item_id));
+    });
+    const missing = [...ids].filter((id) => id && !batchOptionsByItemId[id]);
+    if (!missing.length) return;
+    let active = true;
+    (async () => {
+      const entries = await Promise.all(
+        missing.map(async (id) => [id, await window.vyapar.listBatchAvailability(Number(id))])
+      );
+      if (!active) return;
+      setBatchOptionsByItemId((prev) => {
+        const next = { ...prev };
+        entries.forEach(([id, data]) => {
+          next[id] = data || [];
+        });
+        return next;
+      });
+    })();
+    return () => {
+      active = false;
+    };
+  }, [itemDrafts, batchOptionsByItemId]);
+
+  useEffect(() => {
+    const partyId = Number(supplierDraft.party_id || 0);
+    if (!Number.isFinite(partyId) || partyId <= 0) return;
+    const orderType = (ocrResult?.parsed?.type || defaultType || 'purchase') === 'sale' ? 'sale' : 'purchase';
+    let active = true;
+    (async () => {
+      const rates = await window.vyapar.listPartyRatesForOrder(partyId, orderType);
+      if (!active) return;
+      const rateByItemId = new Map();
+      (rates || []).forEach((row) => {
+        const itemId = Number(row?.item_id);
+        const rate = toNumber(row?.rate);
+        if (!Number.isFinite(itemId) || itemId <= 0) return;
+        if (!Number.isFinite(rate) || rate <= 0) return;
+        rateByItemId.set(String(itemId), rate);
+      });
+      if (!rateByItemId.size) return;
+      setItemDrafts((prev) =>
+        prev.map((row) => {
+          const itemId = String(row.selected_item_id || '');
+          if (!itemId) return row;
+          const currentRate = toNumber(row.rate);
+          if (currentRate > 0) return row;
+          const partyRate = rateByItemId.get(itemId);
+          if (!Number.isFinite(partyRate) || partyRate <= 0) return row;
+          const qty = toNumber(row.qty);
+          return {
+            ...row,
+            rate: partyRate,
+            amount: qty * partyRate
+          };
+        })
+      );
+    })();
+    return () => {
+      active = false;
+    };
+  }, [supplierDraft.party_id, ocrResult?.parsed?.type, defaultType]);
 
   const goToConfirm = () => {
     if (!itemDrafts.length) {
@@ -258,7 +356,8 @@ export default function OcrImport() {
               gst_number: supplierDraft.gst_number || '',
               address: supplierDraft.address || '',
               state_of_supply: supplierDraft.state_of_supply || ''
-            }
+            },
+            apply_round_off: Boolean(applyRoundOff)
           }
         : {
             supplier: {
@@ -324,6 +423,26 @@ export default function OcrImport() {
       supplierMode: supplierDraft.create_new ? 'Create New Supplier' : 'Use Existing Supplier'
     };
   }, [itemDrafts, supplierDraft.create_new]);
+
+  const totals = useMemo(() => {
+    return itemDrafts.reduce(
+      (acc, row) => {
+        const qty = toNumber(row.qty);
+        const rawRate = toNumber(row.rate);
+        const discountPct = toNumber(row.discount_pct);
+        const effectiveRate =
+          discountPct > 0 ? Number((rawRate * (1 - discountPct / 100)).toFixed(2)) : rawRate;
+        const amount = qty > 0 || effectiveRate > 0 ? qty * effectiveRate : toNumber(row.amount);
+        const gstRate = toNumber(row.gst_rate);
+        const gstAmount = amount * (gstRate / 100);
+        acc.itemsTotal += amount;
+        acc.gstTotal += gstAmount;
+        acc.grandTotal += amount + gstAmount;
+        return acc;
+      },
+      { itemsTotal: 0, gstTotal: 0, grandTotal: 0 }
+    );
+  }, [itemDrafts]);
 
   return (
     <div className="space-y-4">
@@ -446,7 +565,19 @@ export default function OcrImport() {
                     <SearchableSelect
                       value={supplierDraft.party_id}
                       options={partyOptions}
-                      onChange={(next) => setSupplierDraft((prev) => ({ ...prev, party_id: String(next || '') }))}
+                      onChange={(next) => {
+                        const nextId = String(next || '');
+                        const matched = parties.find((party) => String(party.id) === nextId);
+                        setSupplierDraft((prev) => ({
+                          ...prev,
+                          party_id: nextId,
+                          name: matched?.name || prev.name,
+                          phone: matched?.phone || prev.phone,
+                          gst_number: matched?.gst_number || prev.gst_number,
+                          address: matched?.address || prev.address,
+                          state_of_supply: matched?.state_of_supply || prev.state_of_supply
+                        }));
+                      }}
                       placeholder="Search party"
                     />
                     <div className={confidenceClass(toNumber(matchResult?.party_match?.confidence || 0))}>
@@ -554,13 +685,23 @@ export default function OcrImport() {
                         <Input
                           value={row.batch_no}
                           onChange={(event) => updateItemDraft(index, 'batch_no', event.target.value)}
+                          list={`batch-options-${row.selected_item_id || row.key}`}
                         />
+                        <datalist id={`batch-options-${row.selected_item_id || row.key}`}>
+                          {(batchOptionsByItemId[String(row.selected_item_id || '')] || []).map((batch) => (
+                            <option
+                              key={batch.batch_no}
+                              value={batch.batch_no}
+                              label={`Qty: ${Number(batch.available_qty || 0)}`}
+                            />
+                          ))}
+                        </datalist>
                       </TD>
                       <TD>
                         <Input
-                          type="date"
                           value={row.expiry_date}
                           onChange={(event) => updateItemDraft(index, 'expiry_date', event.target.value)}
+                          placeholder="MM/YYYY"
                         />
                       </TD>
                       <TD>
@@ -586,6 +727,20 @@ export default function OcrImport() {
                 </TBody>
               </Table>
               </div>
+              <div className="mt-4 ocr-summary-grid">
+                <div className="ocr-summary-box">
+                  <p className="text-xs uppercase text-muted">Items Total</p>
+                  <p className="font-semibold">{formatCurrency(totals.itemsTotal)}</p>
+                </div>
+                <div className="ocr-summary-box">
+                  <p className="text-xs uppercase text-muted">GST Total</p>
+                  <p className="font-semibold">{formatCurrency(totals.gstTotal)}</p>
+                </div>
+                <div className="ocr-summary-box">
+                  <p className="text-xs uppercase text-muted">Grand Total</p>
+                  <p className="font-semibold">{formatCurrency(totals.grandTotal)}</p>
+                </div>
+              </div>
             </CardContent>
           </Card>
 
@@ -606,6 +761,16 @@ export default function OcrImport() {
             <CardTitle>Confirm Import</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
+            {(ocrResult?.parsed?.type || defaultType || 'purchase') === 'sale' && (
+              <label className="flex items-center gap-2 text-sm text-muted">
+                <input
+                  type="checkbox"
+                  checked={applyRoundOff}
+                  onChange={(event) => setApplyRoundOff(event.target.checked)}
+                />
+                Round off final amount
+              </label>
+            )}
             <div className="ocr-summary-grid">
               <div className="ocr-summary-box">
                 <p className="text-xs uppercase text-muted">Supplier</p>
@@ -622,6 +787,18 @@ export default function OcrImport() {
               <div className="ocr-summary-box">
                 <p className="text-xs uppercase text-muted">Create New</p>
                 <p className="font-semibold">{summary.newItems}</p>
+              </div>
+              <div className="ocr-summary-box">
+                <p className="text-xs uppercase text-muted">Items Total</p>
+                <p className="font-semibold">{formatCurrency(totals.itemsTotal)}</p>
+              </div>
+              <div className="ocr-summary-box">
+                <p className="text-xs uppercase text-muted">GST Total</p>
+                <p className="font-semibold">{formatCurrency(totals.gstTotal)}</p>
+              </div>
+              <div className="ocr-summary-box">
+                <p className="text-xs uppercase text-muted">Grand Total</p>
+                <p className="font-semibold">{formatCurrency(totals.grandTotal)}</p>
               </div>
             </div>
 

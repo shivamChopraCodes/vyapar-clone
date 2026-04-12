@@ -9,7 +9,9 @@ const links = [
   { to: '/reports', label: 'Reports' },
   { to: '/ai/gemini', label: 'Gemini API' },
   { to: '/sales', label: 'Sales Orders' },
-  { to: '/purchase', label: 'Purchase Orders' }
+  { to: '/sales/bulk', label: 'Bulk Sales Orders' },
+  { to: '/purchase', label: 'Purchase Orders' },
+  { to: '/snapshots', label: 'Snapshots' }
 ];
 
 export default function Sidebar() {

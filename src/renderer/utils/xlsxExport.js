@@ -158,8 +158,35 @@ function zipStore(files) {
   return concatUint8([...localParts, centralDirectory, end]);
 }
 
-export function buildGstr1WorkbookBlob(rows) {
-  const sheetXml = buildSheetXml(rows);
+/**
+ * Build a multi-sheet XLSX workbook blob from an array of { name, rows } objects.
+ * @param {Array<{name: string, rows: Array<Array<any>>}>} sheets
+ * @returns {Blob}
+ */
+export function buildMultiSheetWorkbookBlob(sheets) {
+  const sheetFiles = sheets.map((sheet, i) => ({
+    name: `xl/worksheets/sheet${i + 1}.xml`,
+    content: buildSheetXml(sheet.rows)
+  }));
+
+  const overrides = sheets
+    .map(
+      (_, i) =>
+        `  <Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`
+    )
+    .join('\n');
+
+  const sheetEntries = sheets
+    .map((s, i) => `    <sheet name="${xmlEscape(s.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`)
+    .join('\n');
+
+  const rels = sheets
+    .map(
+      (_, i) =>
+        `  <Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`
+    )
+    .join('\n');
+
   const files = [
     {
       name: '[Content_Types].xml',
@@ -168,7 +195,7 @@ export function buildGstr1WorkbookBlob(rows) {
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
   <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+${overrides}
 </Types>`
     },
     {
@@ -184,7 +211,7 @@ export function buildGstr1WorkbookBlob(rows) {
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
           xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <sheets>
-    <sheet name="GSTR1" sheetId="1" r:id="rId1"/>
+${sheetEntries}
   </sheets>
 </workbook>`
     },
@@ -192,14 +219,19 @@ export function buildGstr1WorkbookBlob(rows) {
       name: 'xl/_rels/workbook.xml.rels',
       content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+${rels}
 </Relationships>`
     },
-    { name: 'xl/worksheets/sheet1.xml', content: sheetXml }
+    ...sheetFiles
   ];
 
   const zipBytes = zipStore(files);
   return new Blob([zipBytes], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   });
+}
+
+/** Backward-compatible single-sheet wrapper */
+export function buildGstr1WorkbookBlob(rows) {
+  return buildMultiSheetWorkbookBlob([{ name: 'GSTR1', rows }]);
 }

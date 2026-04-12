@@ -246,6 +246,11 @@
     margin: 10mm;
   }
 
+  html,
+  body {
+    height: auto;
+  }
+
   /* Hide everything */
   body * {
     visibility: hidden !important;
@@ -275,6 +280,10 @@
   }
 
   .sidebar {
+    display: none !important;
+  }
+
+  .order-edit > *:not(.invoice-print-wrapper) {
     display: none !important;
   }
 }

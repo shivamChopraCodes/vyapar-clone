@@ -67,17 +67,38 @@ ipcMain.handle('company:list', async () => db.listCompanies());
 ipcMain.handle('company:create', async (_event, payload) => db.upsertCompany(payload));
 
 ipcMain.handle('party:list', async () => db.listParties());
-ipcMain.handle('party:create', async (_event, payload) => db.upsertParty(payload));
+ipcMain.handle('party:create', async (_event, payload) => {
+  db.createSnapshot('Before: party:create', 'party:create', true);
+  return db.upsertParty(payload);
+});
+ipcMain.handle('party:update', async (_event, id, payload) => {
+  db.createSnapshot('Before: party:update', 'party:update', true);
+  return db.updateParty(id, payload);
+});
 
 ipcMain.handle('item:list', async () => db.listItems());
 ipcMain.handle('item:getDetails', async (_event, itemId) => db.getItemDetails(Number(itemId)));
 ipcMain.handle('unit:list', async () => db.listUnits());
 ipcMain.handle('taxCode:list', async () => db.listTaxCodes());
-ipcMain.handle('item:create', async (_event, payload) => db.upsertItem(payload));
+ipcMain.handle('item:create', async (_event, payload) => {
+  db.createSnapshot('Before: item:create', 'item:create', true);
+  return db.upsertItem(payload);
+});
+ipcMain.handle('item:update', async (_event, id, payload) => {
+  db.createSnapshot('Before: item:update', 'item:update', true);
+  return db.updateItem(id, payload);
+});
+ipcMain.handle('item:updateName', async (_event, itemId, name) => {
+  db.createSnapshot('Before: item:updateName', 'item:updateName', true);
+  return db.updateItemName(Number(itemId), name);
+});
 
 ipcMain.handle('batch:list', async (_event, itemId) => db.listBatches(itemId));
 ipcMain.handle('batch:availability', async (_event, itemId) => db.listBatchAvailability(itemId));
-ipcMain.handle('batch:create', async (_event, payload) => db.upsertBatch(payload));
+ipcMain.handle('batch:create', async (_event, payload) => {
+  db.createSnapshot('Before: batch:create', 'batch:create', true);
+  return db.upsertBatch(payload);
+});
 ipcMain.handle('db:export', async (_event, targetPath) => db.exportDatabase(targetPath));
 
 ipcMain.handle('partyRate:list', async (_event, partyId) => db.listPartyRates(partyId));
@@ -88,17 +109,39 @@ ipcMain.handle('partyRate:upsert', async (_event, payload) => db.upsertPartyRate
 
 ipcMain.handle('order:list', async () => db.listOrders());
 ipcMain.handle('report:gstr1Sales', async (_event, range) => db.listGstr1SalesReport(range || {}));
+ipcMain.handle('report:gstr1Full', async (_event, range) => db.buildGstr1FullReport(range || {}));
 ipcMain.handle('order:get', async (_event, orderId) => db.getOrder(Number(orderId)));
 ipcMain.handle('order:items', async (_event, orderId) => db.listOrderItems(orderId));
-ipcMain.handle('order:create', async (_event, payload) => db.createOrder(payload));
-ipcMain.handle('order:update', async (_event, orderId, payload) => db.updateOrder(Number(orderId), payload));
-ipcMain.handle('order:delete', async (_event, orderId) => db.deleteOrder(Number(orderId)));
-ipcMain.handle('order:importPurchaseBillOcr', async (_event, payload) =>
-  db.importPurchaseBillFromOcr(payload)
-);
-ipcMain.handle('order:importSaleBillOcr', async (_event, payload) =>
-  db.importSaleBillFromOcr(payload)
-);
+ipcMain.handle('order:create', async (_event, payload) => {
+  db.createSnapshot('Before: order:create', 'order:create', true);
+  return db.createOrder(payload);
+});
+ipcMain.handle('order:update', async (_event, orderId, payload) => {
+  db.createSnapshot('Before: order:update', 'order:update', true);
+  return db.updateOrder(Number(orderId), payload);
+});
+ipcMain.handle('order:delete', async (_event, orderId) => {
+  db.createSnapshot('Before: order:delete', 'order:delete', true);
+  return db.deleteOrder(Number(orderId));
+});
+ipcMain.handle('order:bulkGenerateSales', async (_event, payload) => {
+  db.createSnapshot('Before: bulkGenerateSales', 'order:bulkGenerateSales', true);
+  return db.bulkGenerateSalesOrders(payload);
+});
+ipcMain.handle('order:importPurchaseBillOcr', async (_event, payload) => {
+  db.createSnapshot('Before: importPurchaseBillOcr', 'order:importPurchaseBillOcr', true);
+  return db.importPurchaseBillFromOcr(payload);
+});
+ipcMain.handle('order:importSaleBillOcr', async (_event, payload) => {
+  db.createSnapshot('Before: importSaleBillOcr', 'order:importSaleBillOcr', true);
+  return db.importSaleBillFromOcr(payload);
+});
+
+// --- Snapshot management ---
+ipcMain.handle('snapshot:create', async (_event, label) => db.createSnapshot(label, 'manual', false));
+ipcMain.handle('snapshot:list', async () => db.listSnapshots());
+ipcMain.handle('snapshot:delete', async (_event, id) => db.deleteSnapshot(id));
+ipcMain.handle('snapshot:rollback', async (_event, id) => db.rollbackToSnapshot(id));
 ipcMain.handle('ocr:processImage', async (_event, imagePath, engine = 'tesseract') => {
   if (engine === 'gemini') {
     const prompt = `You are an expert invoice data extractor. Extract the invoice details accurately from the provided image and return ONLY a valid JSON object matching exactly this structure with no markdown formatting or extra text:
@@ -216,9 +259,13 @@ ipcMain.handle('app:userDataPath', async () => app.getPath('userData'));
 ipcMain.handle('invoice:previewChrome', async (_event, payload) => {
   const markup = payload?.markup ? String(payload.markup) : '';
   const css = payload?.css ? String(payload.css) : '';
+  const rawInvoiceNo = String(payload?.invoice_no || '').trim();
   if (!markup.trim()) {
     throw new Error('Invoice preview markup is missing.');
   }
+  const invoiceNo = rawInvoiceNo || 'NA';
+  const baseName = `GST INVOICE_${invoiceNo}`;
+  const safeName = baseName.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').replace(/\s+/g, ' ').trim();
 
   const previewCssOverride = `
     .invoice-print-wrapper { display: block !important; }
@@ -231,7 +278,7 @@ ipcMain.handle('invoice:previewChrome', async (_event, payload) => {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Invoice Preview</title>
+    <title>${safeName}</title>
     <style>${css}\n${previewCssOverride}</style>
   </head>
   <body>
@@ -239,7 +286,7 @@ ipcMain.handle('invoice:previewChrome', async (_event, payload) => {
   </body>
 </html>`;
 
-  const filePath = path.join(os.tmpdir(), `vyapar_invoice_preview_${Date.now()}.html`);
+  const filePath = path.join(os.tmpdir(), `${safeName}_${Date.now()}.html`);
   fs.writeFileSync(filePath, html, 'utf8');
 
   if (process.platform === 'darwin') {
