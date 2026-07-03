@@ -20,15 +20,65 @@ const toMonthValue = (date) => {
   return `${year}-${month}`;
 };
 
-const parseItemTokens = (value) => {
-  if (!value) return [];
-  return String(value)
-    .split(/[\n,]/)
-    .map((token) => token.trim())
-    .filter(Boolean);
-};
-
 const normalizeAmountBasis = (value) => (String(value || '').toLowerCase() === 'post_tax' ? 'post_tax' : 'pre_tax');
+
+function ItemMultiSelect({ label, options, selectedIds, onToggle, nameById, search, onSearch }) {
+  const query = search.trim().toLowerCase();
+  const filtered = query
+    ? options.filter((option) => option.label.toLowerCase().includes(query))
+    : options;
+  return (
+    <div>
+      <Label>
+        {label} ({selectedIds.size} selected)
+      </Label>
+      <input
+        className="mb-2 w-full rounded-lg border border-border bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accentSoft"
+        value={search}
+        onChange={(event) => onSearch(event.target.value)}
+        placeholder="Search items..."
+      />
+      <div className="max-h-40 overflow-auto rounded-lg border border-border bg-white p-2">
+        {filtered.length ? (
+          filtered.map((option) => (
+            <label
+              key={option.value}
+              className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-accentSoft"
+            >
+              <input
+                type="checkbox"
+                checked={selectedIds.has(option.value)}
+                onChange={() => onToggle(option.value)}
+              />
+              {option.label}
+            </label>
+          ))
+        ) : (
+          <p className="px-2 py-1.5 text-sm text-muted">No matches</p>
+        )}
+      </div>
+      {selectedIds.size > 0 && (
+        <div className="mt-1 flex flex-wrap gap-1">
+          {Array.from(selectedIds).map((id) => (
+            <span
+              key={id}
+              className="inline-flex items-center gap-1 rounded-full bg-accentSoft px-2 py-0.5 text-xs"
+            >
+              {nameById.get(id) || id}
+              <button
+                type="button"
+                className="ml-0.5 text-xs text-muted hover:text-foreground"
+                onClick={() => onToggle(id)}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function BulkSales() {
   const navigate = useNavigate();
@@ -39,8 +89,10 @@ export default function BulkSales() {
   const [partySearch, setPartySearch] = useState('');
   const [mode, setMode] = useState('range');
   const [amountBasisDefault, setAmountBasisDefault] = useState('post_tax');
-  const [includeText, setIncludeText] = useState('');
-  const [excludeText, setExcludeText] = useState('');
+  const [selectedIncludeIds, setSelectedIncludeIds] = useState(new Set());
+  const [selectedExcludeIds, setSelectedExcludeIds] = useState(new Set());
+  const [includeSearch, setIncludeSearch] = useState('');
+  const [excludeSearch, setExcludeSearch] = useState('');
 
   // --- Range mode state ---
   const [rangeMonth, setRangeMonth] = useState(toMonthValue(new Date()));
@@ -75,34 +127,40 @@ export default function BulkSales() {
     [parties]
   );
 
-  const itemIndex = useMemo(() => {
-    const byId = new Map();
-    const byName = new Map();
-    items.forEach((item) => {
-      const id = Number(item.id);
-      if (Number.isFinite(id)) byId.set(String(id), item);
-      if (item.name) byName.set(String(item.name).toLowerCase().trim(), item);
-    });
-    return { byId, byName };
+  const itemOptions = useMemo(
+    () =>
+      items
+        .filter((item) => Number.isFinite(Number(item.id)))
+        .map((item) => ({ value: String(item.id), label: item.name || `Item ${item.id}` })),
+    [items]
+  );
+
+  const itemNameById = useMemo(() => {
+    const map = new Map();
+    items.forEach((item) => map.set(String(item.id), item.name || `Item ${item.id}`));
+    return map;
   }, [items]);
 
-  const resolveItems = (text) => {
-    const tokens = parseItemTokens(text);
-    const ids = [];
-    tokens.forEach((token) => {
-      const direct = itemIndex.byId.get(token);
-      if (direct) {
-        ids.push(Number(direct.id));
-        return;
-      }
-      const byName = itemIndex.byName.get(token.toLowerCase());
-      if (byName) ids.push(Number(byName.id));
+  const toggleSelection = (setter) => (id) => {
+    setter((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
     });
-    return Array.from(new Set(ids)).filter((id) => Number.isFinite(id));
   };
 
-  const includeIds = useMemo(() => resolveItems(includeText), [includeText, itemIndex]);
-  const excludeIds = useMemo(() => resolveItems(excludeText), [excludeText, itemIndex]);
+  const toggleInclude = toggleSelection(setSelectedIncludeIds);
+  const toggleExclude = toggleSelection(setSelectedExcludeIds);
+
+  const includeIds = useMemo(
+    () => Array.from(selectedIncludeIds).map(Number).filter(Number.isFinite),
+    [selectedIncludeIds]
+  );
+  const excludeIds = useMemo(
+    () => Array.from(selectedExcludeIds).map(Number).filter(Number.isFinite),
+    [selectedExcludeIds]
+  );
 
   const updateInvoice = (index, field, value) => {
     setInvoices((prev) =>
@@ -395,28 +453,24 @@ export default function BulkSales() {
               </>
             )}
 
-            <div>
-              <Label>Items Include (comma or new line)</Label>
-              <textarea
-                className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm"
-                rows={3}
-                value={includeText}
-                onChange={(event) => setIncludeText(event.target.value)}
-                placeholder="Item ids or names"
-              />
-              <p className="mt-1 text-xs text-muted">Matched: {includeIds.length} items</p>
-            </div>
-            <div>
-              <Label>Items Exclude (comma or new line)</Label>
-              <textarea
-                className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm"
-                rows={3}
-                value={excludeText}
-                onChange={(event) => setExcludeText(event.target.value)}
-                placeholder="Item ids or names"
-              />
-              <p className="mt-1 text-xs text-muted">Matched: {excludeIds.length} items</p>
-            </div>
+            <ItemMultiSelect
+              label="Items Include"
+              options={itemOptions}
+              selectedIds={selectedIncludeIds}
+              onToggle={toggleInclude}
+              nameById={itemNameById}
+              search={includeSearch}
+              onSearch={setIncludeSearch}
+            />
+            <ItemMultiSelect
+              label="Items Exclude"
+              options={itemOptions}
+              selectedIds={selectedExcludeIds}
+              onToggle={toggleExclude}
+              nameById={itemNameById}
+              search={excludeSearch}
+              onSearch={setExcludeSearch}
+            />
           </div>
         </CardContent>
       </Card>

@@ -29,6 +29,7 @@ const emptyBatch = {
 export default function Items() {
   const navigate = useNavigate();
   const [itemForm, setItemForm] = useState(emptyItem);
+  const [editingItemId, setEditingItemId] = useState('');
   const [batchForm, setBatchForm] = useState(emptyBatch);
   const [items, setItems] = useState([]);
   const [selectedItemId, setSelectedItemId] = useState('');
@@ -97,17 +98,40 @@ export default function Items() {
     }
   };
 
+  const startEditItem = (item) => {
+    setEditingItemId(String(item.id));
+    setItemForm({
+      name: item.name || '',
+      hsn: item.hsn || '',
+      gst_rate: item.gst_rate === undefined || item.gst_rate === null ? '' : String(item.gst_rate),
+      base_rate: item.base_rate === undefined || item.base_rate === null ? '' : String(item.base_rate),
+      base_unit: item.base_unit || ''
+    });
+  };
+
+  const cancelEditItem = () => {
+    setEditingItemId('');
+    setItemForm(emptyItem);
+  };
+
   const saveItem = async (event) => {
     event.preventDefault();
     if (!itemForm.name.trim()) return;
-    await window.vyapar.createItem({
+    const payload = {
       ...itemForm,
       gst_rate: Number(itemForm.gst_rate || 0),
       base_rate: Number(itemForm.base_rate || 0),
       base_unit: itemForm.base_unit?.trim() || ''
-    });
+    };
+    if (editingItemId) {
+      await window.vyapar.updateItem(Number(editingItemId), payload);
+    } else {
+      await window.vyapar.createItem(payload);
+    }
+    setEditingItemId('');
     setItemForm(emptyItem);
     await load();
+    if (editingItemId) await loadItemDetails(editingItemId);
   };
 
   const saveBatch = async (event) => {
@@ -132,7 +156,7 @@ export default function Items() {
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle>Add Item</CardTitle>
+            <CardTitle>{editingItemId ? 'Edit Item' : 'Add Item'}</CardTitle>
           </CardHeader>
           <CardContent>
             <form className="grid grid-cols-1 gap-4" onSubmit={saveItem}>
@@ -179,7 +203,14 @@ export default function Items() {
                   ))}
                 </datalist>
               </div>
-              <Button type="submit">Save Item</Button>
+              <div className="flex gap-3">
+                <Button type="submit">{editingItemId ? 'Update Item' : 'Save Item'}</Button>
+                {editingItemId && (
+                  <Button type="button" variant="outline" onClick={cancelEditItem}>
+                    Cancel
+                  </Button>
+                )}
+              </div>
             </form>
           </CardContent>
         </Card>
@@ -295,6 +326,7 @@ export default function Items() {
                 <TH>Base Rate</TH>
                 <TH>Base Unit</TH>
                 <TH>Stock Qty</TH>
+                <TH>Action</TH>
               </TR>
             </THead>
             <TBody>
@@ -310,6 +342,18 @@ export default function Items() {
                   <TD>{item.base_rate}</TD>
                   <TD>{item.base_unit || '—'}</TD>
                   <TD>{Number(item.stock_qty || 0)}</TD>
+                  <TD>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        startEditItem(item);
+                      }}
+                    >
+                      Edit
+                    </Button>
+                  </TD>
                 </TR>
               ))}
             </TBody>

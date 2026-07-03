@@ -257,8 +257,8 @@ export default function OrderEdit({ forcedOrderType = null }) {
         const batches = batchOptionsByItemId[String(prev.item_id || '')] || [];
         const matched = batches.find((batch) => String(batch.batch_no || '') === String(value || ''));
         if (matched) {
-          if (!next.expiry_date) next.expiry_date = toExpiryMonthValue(matched.expiry_date || '');
-          if (!next.mrp && matched.mrp !== undefined && matched.mrp !== null) {
+          next.expiry_date = toExpiryMonthValue(matched.expiry_date || '');
+          if (matched.mrp !== undefined && matched.mrp !== null) {
             next.mrp = matched.mrp;
           }
         }
@@ -344,8 +344,8 @@ export default function OrderEdit({ forcedOrderType = null }) {
         const batches = batchOptionsByItemId[String(line.item_id || '')] || [];
         const matched = batches.find((batch) => String(batch.batch_no || '') === String(value || ''));
         if (matched) {
-          if (!line.expiry_date) line.expiry_date = toExpiryMonthValue(matched.expiry_date || '');
-          if (!line.mrp && matched.mrp !== undefined && matched.mrp !== null) {
+          line.expiry_date = toExpiryMonthValue(matched.expiry_date || '');
+          if (matched.mrp !== undefined && matched.mrp !== null) {
             line.mrp = matched.mrp;
           }
         }

@@ -19,6 +19,16 @@ const toNumber = (value) => {
 
 const formatCurrency = (value) => `₹ ${toNumber(value).toFixed(2)}`;
 
+// Pre-GST line amount: qty × rate (after any line discount), before GST is added.
+const linePreGstAmount = (row) => {
+  const qty = toNumber(row.qty);
+  const rawRate = toNumber(row.rate);
+  const discountPct = toNumber(row.discount_pct);
+  const effectiveRate =
+    discountPct > 0 ? Number((rawRate * (1 - discountPct / 100)).toFixed(2)) : rawRate;
+  return qty > 0 || effectiveRate > 0 ? qty * effectiveRate : toNumber(row.amount);
+};
+
 const toExpiryMonthValue = (value) => {
   if (!value) return '';
   const raw = String(value).trim();
@@ -154,7 +164,8 @@ export default function OcrImport() {
           selected_item_id: matchedItemId,
           action: match?.action || (matchedItemId ? 'matched' : 'create_new'),
           item_name: source?.item_name || '',
-          hsn: source?.hsn || matchedItem?.hsn || '',
+          ocr_hsn: source?.hsn || '',
+          hsn: matchedItem ? matchedItem.hsn || '' : source?.hsn || '',
           qty: toNumber(source?.qty),
           rate: toNumber(source?.rate),
           amount: toNumber(source?.amount),
@@ -243,13 +254,23 @@ export default function OcrImport() {
           next.action = value ? 'matched' : 'create_new';
           if (value) {
             const matchedItem = items.find((item) => String(item.id) === String(value));
-            if (matchedItem && !String(next.hsn || '').trim()) {
+            if (matchedItem) {
               next.hsn = matchedItem.hsn || '';
             }
+          } else {
+            next.hsn = next.ocr_hsn || '';
           }
         }
         if (field === 'qty' || field === 'rate') {
           next.amount = toNumber(next.qty) * toNumber(next.rate);
+        }
+        if (field === 'batch_no') {
+          const batches = batchOptionsByItemId[String(next.selected_item_id || '')] || [];
+          const matched = batches.find((b) => String(b.batch_no || '') === String(value || ''));
+          if (matched) {
+            next.expiry_date = toExpiryMonthValue(matched.expiry_date || '');
+            if (matched.mrp !== undefined && matched.mrp !== null) next.mrp = matched.mrp;
+          }
         }
         if (field === 'expiry_date') {
           next.expiry_date = toExpiryMonthValue(value);
@@ -427,12 +448,7 @@ export default function OcrImport() {
   const totals = useMemo(() => {
     return itemDrafts.reduce(
       (acc, row) => {
-        const qty = toNumber(row.qty);
-        const rawRate = toNumber(row.rate);
-        const discountPct = toNumber(row.discount_pct);
-        const effectiveRate =
-          discountPct > 0 ? Number((rawRate * (1 - discountPct / 100)).toFixed(2)) : rawRate;
-        const amount = qty > 0 || effectiveRate > 0 ? qty * effectiveRate : toNumber(row.amount);
+        const amount = linePreGstAmount(row);
         const gstRate = toNumber(row.gst_rate);
         const gstAmount = amount * (gstRate / 100);
         acc.itemsTotal += amount;
@@ -654,6 +670,7 @@ export default function OcrImport() {
                     <TH>Qty</TH>
                     <TH>Rate</TH>
                     <TH>GST%</TH>
+                    <TH className="text-right">Amount (Pre-GST)</TH>
                   </TR>
                 </THead>
                 <TBody>
@@ -679,7 +696,14 @@ export default function OcrImport() {
                         </span>
                       </TD>
                       <TD>
-                        <Input value={row.hsn} onChange={(event) => updateItemDraft(index, 'hsn', event.target.value)} />
+                        <Input
+                          value={row.hsn}
+                          onChange={(event) => updateItemDraft(index, 'hsn', event.target.value)}
+                          readOnly={row.action === 'matched'}
+                          className={
+                            row.action === 'matched' ? 'bg-muted text-muted cursor-not-allowed' : ''
+                          }
+                        />
                       </TD>
                       <TD>
                         <Input
@@ -722,12 +746,19 @@ export default function OcrImport() {
                           onChange={(event) => updateItemDraft(index, 'gst_rate', event.target.value)}
                         />
                       </TD>
+                      <TD className="text-right font-medium tabular-nums">
+                        {formatCurrency(linePreGstAmount(row))}
+                      </TD>
                     </TR>
                   ))}
                 </TBody>
               </Table>
               </div>
               <div className="mt-4 ocr-summary-grid">
+                <div className="ocr-summary-box">
+                  <p className="text-xs uppercase text-muted">Total Items</p>
+                  <p className="font-semibold">{summary.totalItems}</p>
+                </div>
                 <div className="ocr-summary-box">
                   <p className="text-xs uppercase text-muted">Items Total</p>
                   <p className="font-semibold">{formatCurrency(totals.itemsTotal)}</p>

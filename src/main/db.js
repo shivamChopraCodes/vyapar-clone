@@ -1941,18 +1941,7 @@ function updateOrder(orderId, order) {
       if (txnType === 3) {
         lineIstId = stockAdjusters.applyPurchaseLineStock(item);
         const purchaseRate = Number(item.rate || 0);
-        if (item.hsn && String(item.hsn).trim()) {
-          db.prepare(
-            `UPDATE kb_items
-             SET item_hsn_sac_code = @hsn,
-                 item_purchase_unit_price = CASE WHEN @purchase_rate > 0 THEN @purchase_rate ELSE item_purchase_unit_price END
-             WHERE item_id = @item_id`
-          ).run({
-            hsn: String(item.hsn).trim(),
-            purchase_rate: purchaseRate,
-            item_id: item.item_id
-          });
-        } else if (purchaseRate > 0) {
+        if (purchaseRate > 0) {
           db.prepare('UPDATE kb_items SET item_purchase_unit_price = ? WHERE item_id = ?').run(
             purchaseRate,
             item.item_id
@@ -2981,18 +2970,7 @@ function createOrder(order) {
       if (txnType === 3) {
         lineIstId = stockAdjusters.applyPurchaseLineStock(item);
         const purchaseRate = Number(item.rate || 0);
-        if (item.hsn && String(item.hsn).trim()) {
-          db.prepare(
-            `UPDATE kb_items
-             SET item_hsn_sac_code = @hsn,
-                 item_purchase_unit_price = CASE WHEN @purchase_rate > 0 THEN @purchase_rate ELSE item_purchase_unit_price END
-             WHERE item_id = @item_id`
-          ).run({
-            hsn: String(item.hsn).trim(),
-            purchase_rate: purchaseRate,
-            item_id: item.item_id
-          });
-        } else if (purchaseRate > 0) {
+        if (purchaseRate > 0) {
           db.prepare('UPDATE kb_items SET item_purchase_unit_price = ? WHERE item_id = ?').run(
             purchaseRate,
             item.item_id
@@ -3148,7 +3126,6 @@ function importPurchaseBillFromOcr(payload) {
   const patchItem = db.prepare(
     `UPDATE kb_items
      SET item_date_modified = CURRENT_TIMESTAMP,
-         item_hsn_sac_code = CASE WHEN trim(COALESCE(@hsn, '')) <> '' THEN @hsn ELSE item_hsn_sac_code END,
          item_purchase_unit_price = CASE WHEN @purchase_rate > 0 THEN @purchase_rate ELSE item_purchase_unit_price END,
          item_tax_id = CASE WHEN @tax_id IS NOT NULL THEN @tax_id ELSE item_tax_id END
      WHERE item_id = @item_id`
@@ -3354,7 +3331,6 @@ function importPurchaseBillFromOcr(payload) {
         try {
           patchItem.run({
             item_id: itemId,
-            hsn,
             purchase_rate: Number.isFinite(rate) ? rate : 0,
             tax_id: ensureTaxId(gstRate)
           });

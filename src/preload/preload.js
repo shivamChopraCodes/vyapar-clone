@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('vyapar', {
   listUnits: () => ipcRenderer.invoke('unit:list'),
   listTaxCodes: () => ipcRenderer.invoke('taxCode:list'),
   createItem: (payload) => ipcRenderer.invoke('item:create', payload),
+  updateItem: (id, payload) => ipcRenderer.invoke('item:update', id, payload),
   updateItemName: (itemId, name) => ipcRenderer.invoke('item:updateName', itemId, name),
 
   listBatches: (itemId) => ipcRenderer.invoke('batch:list', itemId),
