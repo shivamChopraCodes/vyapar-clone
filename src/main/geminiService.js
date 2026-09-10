@@ -103,16 +103,6 @@ async function generateWithGenAiSdk({ apiKey, prompt, imageInlineData, model }) 
   if (!GoogleGenAI) return null;
 
   const ai = new GoogleGenAI({ apiKey });
-  const models = await ai.models.list();
-async function listAllModels() {
-  const models = await ai.models.list();
-  console.log("Available Gemini Models:", models);
-  for (const model of Array.from(models)) {
-    console.log(`* ${model.name} (${model.displayName})`);
-  }
-}
-
-listAllModels();
   const parts = [{ text: String(prompt || '') }];
   if (imageInlineData) {
     parts.push({
@@ -147,16 +137,6 @@ async function generateWithLegacySdk({ apiKey, prompt, imageInlineData, model })
   if (!GoogleGenerativeAI) return null;
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  const models = await genAI.listModels();
-async function listAllModels() {
-  const models = await ai.models.list();
-  console.log("Available Gemini Models:");
-  for (const model of models.models) {
-    console.log(`* ${model.name} (${model.displayName})`);
-  }
-}
-
-listAllModels();
   const generativeModel = genAI.getGenerativeModel({ model: model || 'gemini-1.5-flash' });
   const requestParts = [String(prompt || '')];
   if (imageInlineData) {
