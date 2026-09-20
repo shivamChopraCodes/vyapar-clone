@@ -17,7 +17,7 @@ contextBridge.exposeInMainWorld('vyapar', {
   updateItemName: (itemId, name) => ipcRenderer.invoke('item:updateName', itemId, name),
 
   listBatches: (itemId) => ipcRenderer.invoke('batch:list', itemId),
-  listBatchAvailability: (itemId) => ipcRenderer.invoke('batch:availability', itemId),
+  listBatchAvailability: (itemId, asOfDate) => ipcRenderer.invoke('batch:availability', itemId, asOfDate),
   createBatch: (payload) => ipcRenderer.invoke('batch:create', payload),
   exportDatabase: (targetPath) => ipcRenderer.invoke('db:export', targetPath),
 

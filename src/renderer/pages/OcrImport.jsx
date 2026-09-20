@@ -280,6 +280,12 @@ export default function OcrImport() {
     );
   };
 
+  const currentImportType = (ocrResult?.parsed?.type || defaultType || 'purchase') === 'sale' ? 'sale' : 'purchase';
+
+  useEffect(() => {
+    setBatchOptionsByItemId({});
+  }, [billDraft.order_date, currentImportType]);
+
   useEffect(() => {
     const ids = new Set();
     itemDrafts.forEach((row) => {
@@ -287,10 +293,11 @@ export default function OcrImport() {
     });
     const missing = [...ids].filter((id) => id && !batchOptionsByItemId[id]);
     if (!missing.length) return;
+    const asOfDate = currentImportType === 'sale' ? billDraft.order_date : undefined;
     let active = true;
     (async () => {
       const entries = await Promise.all(
-        missing.map(async (id) => [id, await window.vyapar.listBatchAvailability(Number(id))])
+        missing.map(async (id) => [id, await window.vyapar.listBatchAvailability(Number(id), asOfDate)])
       );
       if (!active) return;
       setBatchOptionsByItemId((prev) => {
@@ -304,7 +311,7 @@ export default function OcrImport() {
     return () => {
       active = false;
     };
-  }, [itemDrafts, batchOptionsByItemId]);
+  }, [itemDrafts, batchOptionsByItemId, billDraft.order_date, currentImportType]);
 
   useEffect(() => {
     const partyId = Number(supplierDraft.party_id || 0);
@@ -716,7 +723,9 @@ export default function OcrImport() {
                             <option
                               key={batch.batch_no}
                               value={batch.batch_no}
-                              label={`Qty: ${Number(batch.available_qty || 0)}`}
+                              label={`${batch.is_expired ? '⚠ EXPIRED · ' : ''}Qty: ${Number(batch.available_qty || 0)}${
+                                batch.expiry_date ? ` · Exp ${toExpiryMonthValue(batch.expiry_date)}` : ''
+                              }`}
                             />
                           ))}
                         </datalist>

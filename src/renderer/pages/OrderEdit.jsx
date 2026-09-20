@@ -437,6 +437,10 @@ export default function OrderEdit({ forcedOrderType = null }) {
   }, [useWholeAmountAsBalance, displayedInvoiceTotal]);
 
   useEffect(() => {
+    setBatchOptionsByItemId({});
+  }, [orderDate, effectiveOrderType]);
+
+  useEffect(() => {
     const ids = new Set();
     if (lineForm.item_id) ids.add(String(lineForm.item_id));
     orderItems.forEach((line) => {
@@ -444,10 +448,11 @@ export default function OrderEdit({ forcedOrderType = null }) {
     });
     const missing = [...ids].filter((id) => id && !batchOptionsByItemId[id]);
     if (!missing.length) return;
+    const asOfDate = effectiveOrderType === 'sale' ? orderDate : undefined;
     let active = true;
     (async () => {
       const entries = await Promise.all(
-        missing.map(async (id) => [id, await window.vyapar.listBatchAvailability(Number(id))])
+        missing.map(async (id) => [id, await window.vyapar.listBatchAvailability(Number(id), asOfDate)])
       );
       if (!active) return;
       setBatchOptionsByItemId((prev) => {
@@ -461,7 +466,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
     return () => {
       active = false;
     };
-  }, [lineForm.item_id, orderItems, batchOptionsByItemId]);
+  }, [lineForm.item_id, orderItems, batchOptionsByItemId, orderDate, effectiveOrderType]);
 
   const numericBalanceAmount = Number.isFinite(Number(balanceAmount)) ? Number(balanceAmount) : 0;
   const remainingBalance = Math.max(displayedInvoiceTotal - numericBalanceAmount, 0);
@@ -539,6 +544,8 @@ export default function OrderEdit({ forcedOrderType = null }) {
     const copy = [...(batches || [])];
     if (effectiveOrderType !== 'sale') return copy;
     return copy.sort((a, b) => {
+      // Non-expired batches first, expired sink to the bottom.
+      if (Boolean(a.is_expired) !== Boolean(b.is_expired)) return a.is_expired ? 1 : -1;
       const aAvail = Number(a.available_qty || 0);
       const bAvail = Number(b.available_qty || 0);
       const aPos = aAvail > 0;
@@ -724,7 +731,9 @@ export default function OrderEdit({ forcedOrderType = null }) {
                   <option
                     key={batch.batch_no}
                     value={batch.batch_no}
-                    label={`Qty: ${Number(batch.available_qty || 0)}`}
+                    label={`${batch.is_expired ? '⚠ EXPIRED · ' : ''}Qty: ${Number(batch.available_qty || 0)}${
+                      batch.expiry_date ? ` · Exp ${toExpiryMonthValue(batch.expiry_date)}` : ''
+                    }`}
                   />
                 ))}
               </datalist>
@@ -843,7 +852,9 @@ export default function OrderEdit({ forcedOrderType = null }) {
                             <option
                               key={batch.batch_no}
                               value={batch.batch_no}
-                              label={`Qty: ${Number(batch.available_qty || 0)}`}
+                              label={`${batch.is_expired ? '⚠ EXPIRED · ' : ''}Qty: ${Number(batch.available_qty || 0)}${
+                                batch.expiry_date ? ` · Exp ${toExpiryMonthValue(batch.expiry_date)}` : ''
+                              }`}
                             />
                           ))}
                         </datalist>

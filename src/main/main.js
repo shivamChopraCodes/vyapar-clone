@@ -94,7 +94,7 @@ ipcMain.handle('item:updateName', async (_event, itemId, name) => {
 });
 
 ipcMain.handle('batch:list', async (_event, itemId) => db.listBatches(itemId));
-ipcMain.handle('batch:availability', async (_event, itemId) => db.listBatchAvailability(itemId));
+ipcMain.handle('batch:availability', async (_event, itemId, asOfDate) => db.listBatchAvailability(itemId, asOfDate));
 ipcMain.handle('batch:create', async (_event, payload) => {
   db.createSnapshot('Before: batch:create', 'batch:create', true);
   return db.upsertBatch(payload);

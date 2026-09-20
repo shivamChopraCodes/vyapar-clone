@@ -907,10 +907,88 @@ function listBatches(itemId) {
     }));
 }
 
-function listBatchAvailability(itemId) {
+function listBatchAvailability(itemId, asOfDate) {
   const db = getDb();
   const resolvedItemId = Number(itemId);
   if (!Number.isFinite(resolvedItemId) || resolvedItemId <= 0) return [];
+  const normalizedAsOf = asOfDate ? String(asOfDate).trim() : '';
+
+  if (normalizedAsOf) {
+    // Batches sellable as of asOfDate. A batch is excluded only if it is expired,
+    // or its first purchase bill is dated AFTER asOfDate (can't sell before you bought it).
+    // Batches with no purchase bill at all (opening stock / stock tracking) are allowed.
+    // first_purchase_date is the earliest purchase across ALL history (not clamped to asOf),
+    // so a future-only purchase is distinguishable from pure opening stock.
+    const rows = db
+      .prepare(
+        `SELECT
+           COALESCE(m.batch_no, b.batch_no) as batch_no,
+           m.first_purchase_date as first_purchase_date,
+           COALESCE(m.expiry_date, b.expiry_date, null) as expiry_date,
+           COALESCE(NULLIF(m.mrp, 0), b.mrp, 0) as mrp,
+           COALESCE(m.purchase_qty, 0) as purchase_qty,
+           COALESCE(m.sale_qty, 0) as sale_qty,
+           COALESCE(m.purchase_qty, 0) - COALESCE(m.sale_qty, 0) as available_qty
+         FROM (
+           SELECT
+             COALESCE(l.lineitem_batch_number, '') as batch_no,
+             MIN(CASE WHEN t.txn_type = 3 THEN date(t.txn_date) END) as first_purchase_date,
+             MAX(l.lineitem_expiry_date) as expiry_date,
+             MAX(COALESCE(l.lineitem_mrp, 0)) as mrp,
+             SUM(CASE WHEN t.txn_type = 3 THEN COALESCE(l.quantity, 0) ELSE 0 END) as purchase_qty,
+             SUM(CASE WHEN t.txn_type = 1 THEN COALESCE(l.quantity, 0) ELSE 0 END) as sale_qty
+           FROM kb_lineitems l
+           JOIN kb_transactions t ON t.txn_id = l.lineitem_txn_id
+           WHERE l.item_id = @item_id
+           GROUP BY COALESCE(l.lineitem_batch_number, '')
+         ) m
+         LEFT JOIN (
+           SELECT COALESCE(ist_batch_number, '') as batch_no,
+                  MAX(ist_expiry_date) as expiry_date,
+                  MAX(COALESCE(ist_mrp, 0)) as mrp
+           FROM kb_item_stock_tracking
+           WHERE ist_item_id = @item_id
+           GROUP BY COALESCE(ist_batch_number, '')
+         ) b ON b.batch_no = m.batch_no
+
+         UNION
+
+         SELECT b.batch_no, NULL as first_purchase_date, b.expiry_date, b.mrp, 0, 0, 0
+         FROM (
+           SELECT COALESCE(ist_batch_number, '') as batch_no,
+                  MAX(ist_expiry_date) as expiry_date,
+                  MAX(COALESCE(ist_mrp, 0)) as mrp
+           FROM kb_item_stock_tracking
+           WHERE ist_item_id = @item_id
+           GROUP BY COALESCE(ist_batch_number, '')
+         ) b
+         WHERE NOT EXISTS (
+           SELECT 1 FROM kb_lineitems l
+           WHERE l.item_id = @item_id AND COALESCE(l.lineitem_batch_number, '') = b.batch_no
+         )
+         ORDER BY batch_no ASC`
+      )
+      .all({ item_id: resolvedItemId });
+
+    return rows
+      .map((row) => ({
+        batch_no: row.batch_no,
+        expiry_date: row.expiry_date || null,
+        mrp: Number(row.mrp || 0),
+        purchase_qty: Number(row.purchase_qty || 0),
+        sale_qty: Number(row.sale_qty || 0),
+        available_qty: Number(row.available_qty || 0),
+        first_purchase_date: row.first_purchase_date || null,
+        is_expired: batchExpiredForInvoice(row.expiry_date, normalizedAsOf)
+      }))
+      // Expired batches are kept (flagged via is_expired) so the user can still pick them.
+      // Only exclude batches whose first purchase bill is dated after the invoice date.
+      .filter(
+        (row) =>
+          !row.first_purchase_date || String(row.first_purchase_date) <= String(normalizedAsOf)
+      );
+  }
+
   const rows = db
     .prepare(
       `
@@ -1046,6 +1124,15 @@ function normalizeExpiryMonthValue(value) {
   const normalizedMatch = String(normalizedDate).match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!normalizedMatch) return null;
   return `${normalizedMatch[1]}-${normalizedMatch[2]}-01`;
+}
+
+function batchExpiredForInvoice(expiryDate, invoiceDate) {
+  if (!expiryDate) return false;
+  const exp = normalizeExpiryMonthValue(expiryDate);
+  if (!exp) return false;
+  const invMonth = String(invoiceDate || '').slice(0, 7);
+  if (!invMonth) return false;
+  return exp.slice(0, 7) < invMonth;
 }
 
 function normalizeBatchValue(value) {
@@ -2817,7 +2904,8 @@ function bulkGenerateSalesOrders(payload) {
             throw new Error(`No candidate items found for invoice ${invoice.invoice_no || invoice.index + 1}.`);
           }
 
-          const lines = selectedIds.map((itemId) => {
+          const lines = [];
+          selectedIds.forEach((itemId) => {
             const item = itemsById.get(itemId);
             const baseRate =
               partyRateMap.get(itemId) ||
@@ -2825,9 +2913,24 @@ function bulkGenerateSalesOrders(payload) {
               Number(item?.base_rate || 0);
             const rate = Number.isFinite(baseRate) && baseRate > 0 ? baseRate : 1;
             const batchList = listBatchAvailabilityAsOf(db, itemId, invoice.date);
-            const batch = batchList.length ? batchList[0] : null;
+            // Exclude only batches whose first purchase bill is dated after the invoice date
+            // (can't sell before you bought it). Opening-stock and expired batches are allowed.
+            const qualifyingBatches = batchList.filter(
+              (b) => !b.first_purchase_date || String(b.first_purchase_date) <= String(invoice.date)
+            );
+            const batch = qualifyingBatches.length ? qualifyingBatches[0] : null;
 
-            return {
+            if (!batch) {
+              warnings.push({
+                invoice_no: invoice.invoice_no || null,
+                party_id: partyId,
+                date: invoice.date,
+                message: `Skipped item ${itemId}: no batch available on or before ${invoice.date}.`
+              });
+              return;
+            }
+
+            lines.push({
               item_id: itemId,
               unit_id: item?.base_unit_id ?? null,
               hsn: item?.hsn || '',
@@ -2838,8 +2941,18 @@ function bulkGenerateSalesOrders(payload) {
               rate,
               qty: 1,
               _available_qty: Number(batch?.available_qty ?? 0)
-            };
+            });
           });
+
+          if (!lines.length) {
+            warnings.push({
+              invoice_no: invoice.invoice_no || null,
+              party_id: partyId,
+              date: invoice.date,
+              message: `Skipped invoice ${invoice.invoice_no || invoice.index + 1}: no items had a batch available on or before ${invoice.date}.`
+            });
+            return;
+          }
 
           if (useTarget) {
             let remaining = invoice.total_amount;
