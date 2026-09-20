@@ -333,8 +333,11 @@ export default function Items() {
               {filteredItems.map((item) => (
                 <TR
                   key={item.id}
-                  className={String(selectedItemId) === String(item.id) ? 'bg-accentSoft' : ''}
-                  onClick={() => setSelectedItemId(String(item.id))}
+                  className={`cursor-pointer hover:bg-accentSoft ${
+                    String(selectedItemId) === String(item.id) ? 'bg-accentSoft' : ''
+                  }`}
+                  title="Open usage: where this item has been sold and purchased"
+                  onClick={() => navigate(`/items/${item.id}`)}
                 >
                   <TD>{item.name}</TD>
                   <TD>{item.hsn || '—'}</TD>
@@ -343,16 +346,28 @@ export default function Items() {
                   <TD>{item.base_unit || '—'}</TD>
                   <TD>{Number(item.stock_qty || 0)}</TD>
                   <TD>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        startEditItem(item);
-                      }}
-                    >
-                      Edit
-                    </Button>
+                    <div className="flex gap-1">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setSelectedItemId(String(item.id));
+                        }}
+                      >
+                        Details
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          startEditItem(item);
+                        }}
+                      >
+                        Edit
+                      </Button>
+                    </div>
                   </TD>
                 </TR>
               ))}
@@ -365,8 +380,13 @@ export default function Items() {
       </Card>
 
       <Card>
-        <CardHeader>
+        <CardHeader className="flex items-center justify-between gap-3">
           <CardTitle>Item Details</CardTitle>
+          {selectedItemId && (
+            <Button type="button" variant="outline" onClick={() => navigate(`/items/${selectedItemId}`)}>
+              View Full Usage
+            </Button>
+          )}
         </CardHeader>
         <CardContent>
           {itemDetails ? (
@@ -403,7 +423,18 @@ export default function Items() {
                   </THead>
                   <TBody>
                     {(itemDetails.batches || []).map((batch) => (
-                      <TR key={batch.id}>
+                      <TR
+                        key={batch.id}
+                        className="cursor-pointer hover:bg-accentSoft"
+                        title="Open usage for this batch"
+                        onClick={() =>
+                          navigate(
+                            `/items/${selectedItemId}?tab=sale${
+                              batch.batch_no ? `&batch=${encodeURIComponent(batch.batch_no)}` : ''
+                            }`
+                          )
+                        }
+                      >
                         <TD>{batch.batch_no || '—'}</TD>
                         <TD>{formatDate(batch.expiry_date)}</TD>
                         <TD>{Number(batch.mrp || 0).toFixed(2)}</TD>

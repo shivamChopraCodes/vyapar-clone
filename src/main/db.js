@@ -720,6 +720,220 @@ function getItemDetails(itemId) {
   };
 }
 
+const ITEM_USAGE_DEFAULT_LIMIT = 100;
+
+function normalizeUsageRow(row) {
+  return {
+    order_id: row.order_id,
+    line_id: row.line_id,
+    order_type: row.txn_type === 3 ? 'purchase' : 'sale',
+    order_date: row.order_date,
+    invoice_no: row.invoice_no || '',
+    party_id: row.party_id || null,
+    party_name: row.party_name || '',
+    batch_no: row.batch_no || '',
+    expiry_date: row.expiry_date || '',
+    qty: Number(row.qty || 0),
+    free_qty: Number(row.free_qty || 0),
+    rate: Number(row.rate || 0),
+    line_total: Number(row.line_total || 0),
+    source: /ocr import/i.test(row.notes || '') ? 'ocr_import' : 'manual'
+  };
+}
+
+function getItemUsage(itemId, options = {}) {
+  const db = getDb();
+  const resolvedItemId = Number(itemId);
+  if (!Number.isFinite(resolvedItemId) || resolvedItemId <= 0) {
+    throw new Error('Invalid item id');
+  }
+
+  const item = db
+    .prepare(
+      `SELECT i.item_id as id,
+              i.item_name as name,
+              i.item_hsn_sac_code as hsn,
+              COALESCE(t.tax_rate, 0) as gst_rate,
+              COALESCE(i.item_sale_unit_price, i.item_purchase_unit_price, 0) as base_rate,
+              COALESCE(i.item_stock_quantity, 0) as stock_qty,
+              COALESCE(u.unit_short_name, u.unit_name, '') as base_unit
+       FROM kb_items i
+       LEFT JOIN kb_tax_code t ON t.tax_code_id = i.item_tax_id
+       LEFT JOIN kb_item_units u ON u.unit_id = i.base_unit_id
+       WHERE i.item_id = ?`
+    )
+    .get(resolvedItemId);
+  if (!item) return null;
+
+  const batchNo = options.batchNo === undefined || options.batchNo === null ? '' : String(options.batchNo).trim();
+  const fromDate = options.fromDate ? String(options.fromDate).trim() : '';
+  const toDate = options.toDate ? String(options.toDate).trim() : '';
+  const search = options.search ? String(options.search).trim() : '';
+  const rawLimit = Number(options.limit);
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 2000) : ITEM_USAGE_DEFAULT_LIMIT;
+
+  const params = { item_id: resolvedItemId };
+  const conditions = ['l.item_id = @item_id', 't.txn_type IN (1, 3)'];
+  if (batchNo) {
+    conditions.push('COALESCE(l.lineitem_batch_number, \'\') = @batch_no');
+    params.batch_no = batchNo;
+  }
+  if (fromDate) {
+    conditions.push('date(t.txn_date) >= date(@from_date)');
+    params.from_date = fromDate;
+  }
+  if (toDate) {
+    conditions.push('date(t.txn_date) <= date(@to_date)');
+    params.to_date = toDate;
+  }
+  if (search) {
+    conditions.push(
+      `(COALESCE(n.full_name, '') LIKE @search
+        OR COALESCE(t.txn_ref_number_char, '') LIKE @search
+        OR COALESCE(l.lineitem_batch_number, '') LIKE @search)`
+    );
+    params.search = `%${search}%`;
+  }
+  const whereClause = conditions.join('\n         AND ');
+
+  const summaryRows = db
+    .prepare(
+      `SELECT t.txn_type,
+              COUNT(DISTINCT t.txn_id) as order_count,
+              COALESCE(SUM(COALESCE(l.quantity, 0)), 0) as qty,
+              COALESCE(SUM(COALESCE(l.total_amount, 0)), 0) as amount,
+              MAX(date(t.txn_date)) as last_date
+       FROM kb_lineitems l
+       JOIN kb_transactions t ON t.txn_id = l.lineitem_txn_id
+       LEFT JOIN kb_names n ON n.name_id = t.txn_name_id
+       WHERE ${whereClause}
+       GROUP BY t.txn_type`
+    )
+    .all(params);
+
+  const emptySummary = { order_count: 0, line_count: 0, qty: 0, amount: 0, last_date: '' };
+  const summary = { sale: { ...emptySummary }, purchase: { ...emptySummary } };
+  summaryRows.forEach((row) => {
+    const key = row.txn_type === 3 ? 'purchase' : 'sale';
+    summary[key] = {
+      order_count: Number(row.order_count || 0),
+      line_count: 0,
+      qty: Number(row.qty || 0),
+      amount: Number(row.amount || 0),
+      last_date: row.last_date || ''
+    };
+  });
+
+  const lineCounts = db
+    .prepare(
+      `SELECT t.txn_type, COUNT(*) as line_count
+       FROM kb_lineitems l
+       JOIN kb_transactions t ON t.txn_id = l.lineitem_txn_id
+       LEFT JOIN kb_names n ON n.name_id = t.txn_name_id
+       WHERE ${whereClause}
+       GROUP BY t.txn_type`
+    )
+    .all(params);
+  lineCounts.forEach((row) => {
+    const key = row.txn_type === 3 ? 'purchase' : 'sale';
+    summary[key].line_count = Number(row.line_count || 0);
+  });
+
+  const rowsStmt = db.prepare(
+    `SELECT t.txn_id as order_id,
+            l.lineitem_id as line_id,
+            t.txn_type,
+            t.txn_date as order_date,
+            t.txn_ref_number_char as invoice_no,
+            t.txn_name_id as party_id,
+            COALESCE(n.full_name, '') as party_name,
+            COALESCE(l.quantity, 0) as qty,
+            COALESCE(l.lineitem_free_quantity, 0) as free_qty,
+            COALESCE(l.priceperunit, 0) as rate,
+            COALESCE(l.total_amount, 0) as line_total,
+            COALESCE(l.lineitem_batch_number, '') as batch_no,
+            COALESCE(l.lineitem_expiry_date, '') as expiry_date,
+            COALESCE(t.txn_description, '') as notes
+     FROM kb_lineitems l
+     JOIN kb_transactions t ON t.txn_id = l.lineitem_txn_id
+     LEFT JOIN kb_names n ON n.name_id = t.txn_name_id
+     WHERE ${whereClause}
+       AND t.txn_type = @txn_type
+     ORDER BY date(t.txn_date) DESC, t.txn_id DESC, l.lineitem_id DESC
+     LIMIT @limit`
+  );
+
+  const sales = rowsStmt.all({ ...params, txn_type: 1, limit }).map(normalizeUsageRow);
+  const purchases = rowsStmt.all({ ...params, txn_type: 3, limit }).map(normalizeUsageRow);
+
+  const batchUsage = db
+    .prepare(
+      `SELECT COALESCE(l.lineitem_batch_number, '') as batch_no,
+              COALESCE(SUM(CASE WHEN t.txn_type = 1 THEN COALESCE(l.quantity, 0) ELSE 0 END), 0) as sale_qty,
+              COALESCE(SUM(CASE WHEN t.txn_type = 3 THEN COALESCE(l.quantity, 0) ELSE 0 END), 0) as purchase_qty,
+              COUNT(DISTINCT t.txn_id) as order_count,
+              MAX(date(t.txn_date)) as last_used_date
+       FROM kb_lineitems l
+       JOIN kb_transactions t ON t.txn_id = l.lineitem_txn_id
+       WHERE l.item_id = @item_id
+         AND t.txn_type IN (1, 3)
+       GROUP BY COALESCE(l.lineitem_batch_number, '')`
+    )
+    .all({ item_id: resolvedItemId });
+
+  const usageByBatch = new Map();
+  batchUsage.forEach((row) => {
+    usageByBatch.set(row.batch_no || '', {
+      sale_qty: Number(row.sale_qty || 0),
+      purchase_qty: Number(row.purchase_qty || 0),
+      order_count: Number(row.order_count || 0),
+      last_used_date: row.last_used_date || ''
+    });
+  });
+
+  const stockBatches = listBatches(resolvedItemId);
+  const seenBatches = new Set();
+  const batches = stockBatches.map((batch) => {
+    const key = batch.batch_no || '';
+    seenBatches.add(key);
+    const usage = usageByBatch.get(key) || { sale_qty: 0, purchase_qty: 0, order_count: 0, last_used_date: '' };
+    return {
+      id: batch.id,
+      batch_no: batch.batch_no || '',
+      expiry_date: batch.expiry_date || '',
+      mrp: Number(batch.mrp || 0),
+      qty: Number(batch.qty || 0),
+      ...usage
+    };
+  });
+  usageByBatch.forEach((usage, key) => {
+    if (seenBatches.has(key)) return;
+    batches.push({
+      id: `usage:${key || 'no-batch'}`,
+      batch_no: key,
+      expiry_date: '',
+      mrp: 0,
+      qty: 0,
+      ...usage
+    });
+  });
+  batches.sort((a, b) => String(b.last_used_date || '').localeCompare(String(a.last_used_date || '')));
+
+  return {
+    item: {
+      ...item,
+      stock_qty: Number(item.stock_qty || 0),
+      gst_rate: Number(item.gst_rate || 0),
+      base_rate: Number(item.base_rate || 0)
+    },
+    filters: { batch_no: batchNo, from_date: fromDate, to_date: toDate, search, limit },
+    summary,
+    batches,
+    sales,
+    purchases
+  };
+}
+
 function listUnits() {
   return getDb()
     .prepare(
@@ -4664,6 +4878,7 @@ module.exports = {
   upsertParty,
   listItems,
   getItemDetails,
+  getItemUsage,
   listUnits,
   listTaxCodes,
   upsertItem,

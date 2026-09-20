@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('vyapar', {
 
   listItems: () => ipcRenderer.invoke('item:list'),
   getItemDetails: (itemId) => ipcRenderer.invoke('item:getDetails', itemId),
+  getItemUsage: (itemId, options) => ipcRenderer.invoke('item:usage', itemId, options),
   listUnits: () => ipcRenderer.invoke('unit:list'),
   listTaxCodes: () => ipcRenderer.invoke('taxCode:list'),
   createItem: (payload) => ipcRenderer.invoke('item:create', payload),

@@ -103,6 +103,7 @@ ipcMain.handle('party:restore', async (_event, partyId) => {
 
 ipcMain.handle('item:list', async () => db.listItems());
 ipcMain.handle('item:getDetails', async (_event, itemId) => db.getItemDetails(Number(itemId)));
+ipcMain.handle('item:usage', async (_event, itemId, options) => db.getItemUsage(Number(itemId), options || {}));
 ipcMain.handle('unit:list', async () => db.listUnits());
 ipcMain.handle('taxCode:list', async () => db.listTaxCodes());
 ipcMain.handle('item:create', async (_event, payload) => {
