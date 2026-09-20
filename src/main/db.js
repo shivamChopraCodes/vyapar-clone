@@ -4155,6 +4155,80 @@ function importFromVyaparSqlite(sqlitePath) {
   return result;
 }
 
+// Recent sale lines for one item. Used to settle ambiguous pack quantities on handwritten slips:
+// how an item was actually billed beats any naming convention.
+function listItemSaleHistory(itemId, limit = 20) {
+  const db = getDb();
+  const id = Number(itemId);
+  if (!Number.isFinite(id) || id <= 0) return [];
+  return db
+    .prepare(
+      `SELECT l.quantity AS qty,
+              l.priceperunit AS rate,
+              l.total_amount AS amount,
+              l.lineitem_mrp AS mrp,
+              t.txn_date AS order_date
+       FROM kb_lineitems l
+       JOIN kb_transactions t ON t.txn_id = l.lineitem_txn_id
+       WHERE l.item_id = ?
+         AND t.txn_type = 1
+         AND COALESCE(l.priceperunit, 0) > 0
+       ORDER BY date(t.txn_date) DESC, t.txn_id DESC
+       LIMIT ?`
+    )
+    .all(id, Number(limit) || 20);
+}
+
+// Direct handle for modules that need to run their own DDL/queries (the Telegram draft store).
+// The HSN codes this business actually uses, most common first. Drives the quick-pick buttons
+// when a new item is created from a slip, which never carries an HSN of its own.
+function listCommonHsnCodes(limit = 5) {
+  return getDb()
+    .prepare(
+      `SELECT item_hsn_sac_code AS hsn, COUNT(*) AS uses
+       FROM kb_items
+       WHERE trim(COALESCE(item_hsn_sac_code, '')) <> ''
+       GROUP BY item_hsn_sac_code
+       ORDER BY uses DESC
+       LIMIT ?`
+    )
+    .all(Number(limit) || 5);
+}
+
+// Rates this firm's items are actually on, most used first — not every rate defined in
+// kb_tax_code, which lists a dozen slabs the business has never touched. The standard slabs are
+// appended so an unusual item is still possible without leaving the picker.
+const STANDARD_GST_SLABS = [0, 5, 12, 18, 28];
+
+function listUsedTaxRates() {
+  const used = getDb()
+    .prepare(
+      `SELECT t.tax_rate AS rate, COUNT(*) AS uses
+       FROM kb_items i
+       JOIN kb_tax_code t ON t.tax_code_id = i.item_tax_id
+       WHERE COALESCE(t.tax_rate, -1) >= 0
+       GROUP BY t.tax_rate
+       ORDER BY uses DESC`
+    )
+    .all()
+    .map((row) => Number(row.rate));
+
+  const seen = new Set(used);
+  STANDARD_GST_SLABS.forEach((rate) => {
+    if (!seen.has(rate)) {
+      seen.add(rate);
+      used.push(rate);
+    }
+  });
+  return used;
+}
+
+// The invoice number this firm's own sequence would assign next. Shown in the Telegram preview
+// so a slip's supplier-side serial is never mistaken for it.
+function peekNextInvoiceNumber(orderType = 'sale') {
+  return getNextRefNumberByTxnType(getDb(), orderType === 'purchase' ? 3 : 1);
+}
+
 const CASH_PAYMENT_TYPE_ID = 1;
 
 const round2 = (value) => Math.round((Number(value) || 0) * 100) / 100;
@@ -4347,6 +4421,10 @@ function listInactiveParties() {
        FROM kb_names WHERE name_is_active = 0 ORDER BY full_name`
     )
     .all();
+}
+
+function getDbHandle() {
+  return getDb();
 }
 
 function getDbInfo() {
@@ -4611,6 +4689,11 @@ module.exports = {
   importFromVyaparDump,
   importFromVyaparSqlite,
   getDbInfo,
+  getDbHandle,
+  listItemSaleHistory,
+  listCommonHsnCodes,
+  listUsedTaxRates,
+  peekNextInvoiceNumber,
   getMode,
   setMode,
   resetDevDb,

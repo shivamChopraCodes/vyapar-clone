@@ -7,6 +7,8 @@ const db = require('./db');
 const { processInvoiceFile } = require('./ocrService');
 const { matchParty, matchItems } = require('./matchingService');
 const { getGeminiApiKey, setGeminiApiKey, generateGeminiResponse } = require('./geminiService');
+const telegramBot = require('./telegram/telegramBot');
+const telegramSettings = require('./telegram/telegramSettings');
 
 const isDev = !app.isPackaged;
 const OCR_SETTINGS_FILE = 'ocr-settings.json';
@@ -54,6 +56,13 @@ function createWindow() {
 app.whenReady().then(() => {
   createWindow();
 
+  // Resume polling only if the user previously enabled it; a stored token alone is not consent.
+  if (telegramSettings.readSettings().enabled) {
+    telegramBot.start().catch((error) => {
+      console.warn('[telegram] autostart failed:', error?.message || error);
+    });
+  }
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -61,6 +70,11 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  // Not user-initiated: quitting must leave the bot enabled so it resumes on the next launch.
+  telegramBot.stop(false).catch(() => {});
 });
 
 ipcMain.handle('company:list', async () => db.listCompanies());
@@ -264,6 +278,28 @@ ipcMain.handle('gemini:getApiKey', async () => getGeminiApiKey());
 ipcMain.handle('gemini:setApiKey', async (_event, key = '') => setGeminiApiKey(key));
 ipcMain.handle('gemini:generate', async (_event, payload) => generateGeminiResponse(payload || {}));
 ipcMain.handle('debug:dbInfo', async () => db.getDbInfo());
+
+// --- Telegram bot ---
+ipcMain.handle('telegram:getSettings', async () => telegramSettings.readPublicSettings());
+ipcMain.handle('telegram:setToken', async (_event, token) => {
+  const trimmed = String(token || '').trim();
+  if (trimmed) {
+    // Reject a bad token at entry rather than letting the poll loop fail repeatedly later.
+    await telegramBot.testConnection(trimmed);
+  }
+  telegramSettings.writeSettings({ botToken: trimmed });
+  return telegramSettings.readPublicSettings();
+});
+ipcMain.handle('telegram:getStatus', async () => telegramBot.getStatus());
+ipcMain.handle('telegram:start', async () => telegramBot.start());
+ipcMain.handle('telegram:stop', async () => telegramBot.stop());
+ipcMain.handle('telegram:approveChat', async () => telegramBot.approvePendingChat());
+ipcMain.handle('telegram:clearChat', async () => {
+  telegramSettings.writeSettings({ allowedChatId: '' });
+  return telegramSettings.readPublicSettings();
+});
+ipcMain.handle('telegram:sendTest', async () => telegramBot.sendTestMessage());
+
 // --- Dev mode (sandbox database) ---
 ipcMain.handle('dbMode:get', async () => db.getMode());
 ipcMain.handle('dbMode:set', async (_event, mode) => {
