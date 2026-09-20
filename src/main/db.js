@@ -4251,6 +4251,104 @@ function listOutstanding(orderType = 'sale') {
     .all(orderType === 'purchase' ? 3 : 1);
 }
 
+// One party with the numbers needed to decide whether removing it is safe.
+function getPartyDetails(partyId) {
+  const db = getDb();
+  const id = Number(partyId);
+  const party = db
+    .prepare(
+      `SELECT name_id as id, full_name as name, phone_number as phone, address,
+              name_gstin_number as gst_number, name_tin_number as tin_number,
+              name_state as state_of_supply, name_is_active as is_active,
+              date_created, date_modified
+       FROM kb_names WHERE name_id = ?`
+    )
+    .get(id);
+  if (!party) return null;
+
+  const stats = db
+    .prepare(
+      `SELECT COUNT(*) as txn_count,
+              SUM(CASE WHEN txn_type = 1 THEN 1 ELSE 0 END) as sale_count,
+              SUM(CASE WHEN txn_type = 3 THEN 1 ELSE 0 END) as purchase_count,
+              MAX(txn_date) as last_txn_date
+       FROM kb_transactions WHERE txn_name_id = ?`
+    )
+    .get(id);
+
+  const recent = db
+    .prepare(
+      `SELECT txn_id as id, txn_type, txn_ref_number_char as ref_number, txn_date as order_date,
+              ROUND(COALESCE(txn_cash_amount,0) + COALESCE(txn_balance_amount,0), 2) as total
+       FROM kb_transactions WHERE txn_name_id = ?
+       ORDER BY date(txn_date) DESC, txn_id DESC LIMIT 10`
+    )
+    .all(id);
+
+  return {
+    ...party,
+    is_active: Number(party.is_active) === 1,
+    txn_count: Number(stats?.txn_count || 0),
+    sale_count: Number(stats?.sale_count || 0),
+    purchase_count: Number(stats?.purchase_count || 0),
+    last_txn_date: stats?.last_txn_date || null,
+    recent_orders: recent
+  };
+}
+
+/**
+ * Removes a party from the active list.
+ *
+ * A party with transactions is deactivated, never deleted — its invoices reference name_id and
+ * hard-deleting would orphan them and corrupt historical reports. Only a party that has never
+ * been used is removed outright.
+ */
+function deleteParty(partyId, { force = false } = {}) {
+  const db = getDb();
+  const id = Number(partyId);
+  const details = getPartyDetails(id);
+  if (!details) throw new Error('Party not found.');
+
+  if (details.txn_count > 0 && !force) {
+    db.prepare('UPDATE kb_names SET name_is_active = 0, date_modified = CURRENT_TIMESTAMP WHERE name_id = ?').run(id);
+    return {
+      ok: true,
+      mode: 'deactivated',
+      txn_count: details.txn_count,
+      message: `"${details.name}" has ${details.txn_count} transaction(s), so it was hidden rather than deleted. Its invoices are unchanged.`
+    };
+  }
+
+  if (details.txn_count > 0 && force) {
+    throw new Error(
+      `"${details.name}" still has ${details.txn_count} transaction(s) and cannot be permanently deleted.`
+    );
+  }
+
+  // Party-wise rates would otherwise be left pointing at a name_id that no longer exists.
+  db.prepare('DELETE FROM kb_party_item_rate WHERE party_item_rate_party_id = ?').run(id);
+  db.prepare('DELETE FROM kb_names WHERE name_id = ?').run(id);
+  return { ok: true, mode: 'deleted', txn_count: 0, message: `"${details.name}" was removed.` };
+}
+
+function restoreParty(partyId) {
+  getDb()
+    .prepare('UPDATE kb_names SET name_is_active = 1, date_modified = CURRENT_TIMESTAMP WHERE name_id = ?')
+    .run(Number(partyId));
+  return { ok: true };
+}
+
+// Hidden parties, so a deactivation can be undone from the UI.
+function listInactiveParties() {
+  return getDb()
+    .prepare(
+      `SELECT name_id as id, full_name as name, phone_number as phone,
+              name_gstin_number as gst_number, date_modified
+       FROM kb_names WHERE name_is_active = 0 ORDER BY full_name`
+    )
+    .all();
+}
+
 function getDbInfo() {
   const db = getDb();
   const tables = db
@@ -4522,7 +4620,11 @@ module.exports = {
   deleteSnapshot,
   rollbackToSnapshot,
   updateParty,
+  getPartyDetails,
   recordPayment,
   listOutstanding,
+  deleteParty,
+  restoreParty,
+  listInactiveParties,
   updateItem
 };

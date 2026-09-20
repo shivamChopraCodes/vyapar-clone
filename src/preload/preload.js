@@ -7,6 +7,10 @@ contextBridge.exposeInMainWorld('vyapar', {
   listParties: () => ipcRenderer.invoke('party:list'),
   createParty: (payload) => ipcRenderer.invoke('party:create', payload),
   updateParty: (id, payload) => ipcRenderer.invoke('party:update', id, payload),
+  getPartyDetails: (id) => ipcRenderer.invoke('party:details', id),
+  listInactiveParties: () => ipcRenderer.invoke('party:listInactive'),
+  deleteParty: (id, options) => ipcRenderer.invoke('party:delete', id, options),
+  restoreParty: (id) => ipcRenderer.invoke('party:restore', id),
 
   listItems: () => ipcRenderer.invoke('item:list'),
   getItemDetails: (itemId) => ipcRenderer.invoke('item:getDetails', itemId),

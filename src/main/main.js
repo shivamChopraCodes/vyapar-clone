@@ -76,6 +76,17 @@ ipcMain.handle('party:update', async (_event, id, payload) => {
   return db.updateParty(id, payload);
 });
 
+ipcMain.handle('party:details', async (_event, partyId) => db.getPartyDetails(Number(partyId)));
+ipcMain.handle('party:listInactive', async () => db.listInactiveParties());
+ipcMain.handle('party:delete', async (_event, partyId, options) => {
+  db.createSnapshot('Before: party:delete', 'party:delete', true);
+  return db.deleteParty(Number(partyId), options || {});
+});
+ipcMain.handle('party:restore', async (_event, partyId) => {
+  db.createSnapshot('Before: party:restore', 'party:restore', true);
+  return db.restoreParty(Number(partyId));
+});
+
 ipcMain.handle('item:list', async () => db.listItems());
 ipcMain.handle('item:getDetails', async (_event, itemId) => db.getItemDetails(Number(itemId)));
 ipcMain.handle('unit:list', async () => db.listUnits());
