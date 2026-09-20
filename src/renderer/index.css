@@ -39,6 +39,41 @@ body.dev-mode {
   overflow-y: auto;
 }
 
+.payment-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(18, 18, 18, 0.38);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 50;
+}
+
+.payment-dialog {
+  background: #fff;
+  border: 1px solid #dedad3;
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(12, 74, 110, 0.22);
+  padding: 24px;
+  width: 100%;
+  max-width: 420px;
+}
+
+.payment-figures {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 16px;
+  margin: 18px 0 0;
+  padding: 14px 16px;
+  background: #f6f5f2;
+  border-radius: 10px;
+  font-size: 13.5px;
+}
+
+.payment-figures dt { color: #6b6b6b; }
+.payment-figures dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+
 .db-mode-switch {
   margin-bottom: 20px;
   padding: 10px 12px;

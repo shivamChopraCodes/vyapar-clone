@@ -135,6 +135,10 @@ export default function Orders({ mode = 'sale' }) {
   const [orders, setOrders] = useState([]);
   const [selectedOrderId, setSelectedOrderId] = useState(null);
   const [filters, setFilters] = useState(loadStoredFilters);
+  const [paymentOrder, setPaymentOrder] = useState(null);
+  const [paymentAmount, setPaymentAmount] = useState('');
+  const [paymentBusy, setPaymentBusy] = useState(false);
+  const [paymentError, setPaymentError] = useState('');
 
   const load = async () => {
     const [partyData, orderData] = await Promise.all([
@@ -143,6 +147,29 @@ export default function Orders({ mode = 'sale' }) {
     ]);
     setParties(partyData);
     setOrders(orderData);
+  };
+
+  // Receiving money against an invoice: the amount lives in the cash/balance split on the header,
+  // so recording a payment is just moving part of the balance across.
+  const openPayment = (order) => {
+    setPaymentOrder(order);
+    setPaymentAmount(String(Number(order.outstanding_amount || 0).toFixed(2)));
+    setPaymentError('');
+  };
+
+  const submitPayment = async () => {
+    if (!paymentOrder) return;
+    setPaymentBusy(true);
+    setPaymentError('');
+    try {
+      await window.vyapar.recordPayment(paymentOrder.id, Number(paymentAmount));
+      setPaymentOrder(null);
+      await load();
+    } catch (error) {
+      setPaymentError(error?.message || 'Could not record the payment.');
+    } finally {
+      setPaymentBusy(false);
+    }
   };
 
   const deleteOrder = async (order) => {
@@ -451,6 +478,18 @@ export default function Orders({ mode = 'sale' }) {
                     </TD>
                     <TD>
                       <div className="flex gap-2">
+                        {!isPaid && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openPayment(order);
+                            }}
+                          >
+                            Receive
+                          </Button>
+                        )}
                         <Button type="button" variant="ghost" onClick={() => navigate(`/orders/${order.id}/edit`)}>
                           Edit
                         </Button>
@@ -469,6 +508,76 @@ export default function Orders({ mode = 'sale' }) {
           )}
         </CardContent>
       </Card>
+
+      {paymentOrder && (
+        <div className="payment-overlay" role="dialog" aria-modal="true" aria-label="Record payment">
+          <div className="payment-dialog">
+            <h3 className="section-title text-lg font-semibold">Record payment</h3>
+            <p className="mt-1 text-sm text-muted">
+              {getInvoiceNo(paymentOrder) || paymentOrder.id} ·{' '}
+              {paymentOrder.party_name || partiesMap.get(String(paymentOrder.party_id))?.name || '—'}
+            </p>
+
+            <dl className="payment-figures">
+              <dt>Invoice total</dt>
+              <dd>{formatCurrency(paymentOrder.header_total)}</dd>
+              <dt>Already received</dt>
+              <dd>{formatCurrency(paymentOrder.paid_amount)}</dd>
+              <dt>Outstanding</dt>
+              <dd className="font-semibold">{formatCurrency(paymentOrder.outstanding_amount)}</dd>
+            </dl>
+
+            <div className="mt-4">
+              <Label htmlFor="pay-amount">Amount received now</Label>
+              <Input
+                id="pay-amount"
+                value={paymentAmount}
+                onChange={(event) => setPaymentAmount(event.target.value)}
+                inputMode="decimal"
+              />
+            </div>
+
+            <div className="mt-2 flex gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() =>
+                  setPaymentAmount(String(Number(paymentOrder.outstanding_amount || 0).toFixed(2)))
+                }
+              >
+                Full amount
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() =>
+                  setPaymentAmount(
+                    String((Number(paymentOrder.outstanding_amount || 0) / 2).toFixed(2))
+                  )
+                }
+              >
+                Half
+              </Button>
+            </div>
+
+            {paymentError ? <p className="mt-3 text-sm text-red-700">{paymentError}</p> : null}
+
+            <div className="mt-5 flex gap-2">
+              <Button type="button" onClick={submitPayment} disabled={paymentBusy}>
+                {paymentBusy ? 'Saving…' : 'Record payment'}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setPaymentOrder(null)}
+                disabled={paymentBusy}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

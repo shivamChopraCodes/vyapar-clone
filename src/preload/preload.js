@@ -33,6 +33,8 @@ contextBridge.exposeInMainWorld('vyapar', {
   createOrder: (payload) => ipcRenderer.invoke('order:create', payload),
   updateOrder: (orderId, payload) => ipcRenderer.invoke('order:update', orderId, payload),
   deleteOrder: (orderId) => ipcRenderer.invoke('order:delete', orderId),
+  listOutstanding: (orderType) => ipcRenderer.invoke('order:outstanding', orderType),
+  recordPayment: (orderId, amount) => ipcRenderer.invoke('order:recordPayment', orderId, amount),
   bulkGenerateSalesOrders: (payload) => ipcRenderer.invoke('order:bulkGenerateSales', payload),
   importPurchaseBillOcr: (payload) => ipcRenderer.invoke('order:importPurchaseBillOcr', payload),
   importSaleBillOcr: (payload) => ipcRenderer.invoke('order:importSaleBillOcr', payload),

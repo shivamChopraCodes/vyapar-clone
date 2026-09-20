@@ -2182,6 +2182,8 @@ function updateOrder(orderId, order) {
       });
     });
     upsertPartyRatesFromOrder(db, payload.party_id || null, txnType, payload.items || []);
+    // Editing an invoice can change its cash figure, so the payment row has to follow.
+    syncPaymentMapping(db, orderId, cashAmount);
 
     return orderId;
   });
@@ -3294,6 +3296,9 @@ function createOrder(order) {
       }
     });
     upsertPartyRatesFromOrder(db, payload.party_id || null, txnType, payload.items || []);
+    // Vyapar writes one payment row per invoice matching the cash figure. Without this, invoices
+    // created here are invisible to anything that reads payment allocation.
+    syncPaymentMapping(db, orderId, cashAmount);
 
     return orderId;
   });
@@ -4150,6 +4155,102 @@ function importFromVyaparSqlite(sqlitePath) {
   return result;
 }
 
+const CASH_PAYMENT_TYPE_ID = 1;
+
+const round2 = (value) => Math.round((Number(value) || 0) * 100) / 100;
+
+/**
+ * Keeps txn_payment_mapping in step with the header's cash figure.
+ *
+ * Every one of the 1,481 rows Vyapar wrote holds exactly one mapping per invoice whose amount
+ * equals txn_cash_amount, so this maintains that invariant rather than appending a second row and
+ * breaking every report that assumes it.
+ */
+function syncPaymentMapping(db, txnId, cashAmount) {
+  const existing = db
+    .prepare('SELECT id FROM txn_payment_mapping WHERE txn_id = ? ORDER BY id ASC LIMIT 1')
+    .get(Number(txnId));
+  if (existing) {
+    db.prepare('UPDATE txn_payment_mapping SET amount = ? WHERE id = ?').run(
+      Number(cashAmount) || 0,
+      existing.id
+    );
+    return existing.id;
+  }
+  return Number(
+    db
+      .prepare(
+        `INSERT INTO txn_payment_mapping (payment_id, txn_id, amount, payment_reference)
+         VALUES (?, ?, ?, '')`
+      )
+      .run(CASH_PAYMENT_TYPE_ID, Number(txnId), Number(cashAmount) || 0).lastInsertRowid
+  );
+}
+
+/**
+ * Records money received against an invoice.
+ *
+ * Payment state lives in the cash/balance split on the header — txn_payment_status carries no
+ * meaning in this data (both of its values appear on paid and unpaid invoices alike), so it is
+ * deliberately left alone.
+ */
+function recordPayment(orderId, amount) {
+  const db = getDb();
+  const id = Number(orderId);
+  const row = db
+    .prepare(
+      `SELECT COALESCE(txn_cash_amount, 0) AS cash, COALESCE(txn_balance_amount, 0) AS balance
+       FROM kb_transactions WHERE txn_id = ?`
+    )
+    .get(id);
+  if (!row) throw new Error('Invoice not found.');
+
+  const total = round2(row.cash + row.balance);
+  const requested = Number(amount);
+  if (!Number.isFinite(requested) || requested <= 0) {
+    throw new Error('Enter a payment amount greater than zero.');
+  }
+  if (requested > row.balance + 0.005) {
+    throw new Error(
+      `Only ₹${row.balance.toFixed(2)} is outstanding on this invoice.`
+    );
+  }
+
+  const newBalance = round2(Math.max(0, row.balance - requested));
+  const newCash = round2(total - newBalance);
+
+  return db.transaction(() => {
+    db.prepare(
+      `UPDATE kb_transactions
+       SET txn_cash_amount = ?, txn_balance_amount = ?, txn_date_modified = CURRENT_TIMESTAMP
+       WHERE txn_id = ?`
+    ).run(newCash, newBalance, id);
+    syncPaymentMapping(db, id, newCash);
+    return { ok: true, paid: newCash, outstanding: newBalance, total };
+  })();
+}
+
+// Invoices still owed money, newest first — the receivables list.
+function listOutstanding(orderType = 'sale') {
+  return getDb()
+    .prepare(
+      `SELECT t.txn_id AS id,
+              t.txn_ref_number_char AS ref_number,
+              t.txn_date AS order_date,
+              n.full_name AS party_name,
+              t.txn_name_id AS party_id,
+              ROUND(COALESCE(t.txn_cash_amount, 0), 2) AS paid,
+              ROUND(COALESCE(t.txn_balance_amount, 0), 2) AS outstanding,
+              ROUND(COALESCE(t.txn_cash_amount, 0) + COALESCE(t.txn_balance_amount, 0), 2) AS total
+       FROM kb_transactions t
+       LEFT JOIN kb_names n ON n.name_id = t.txn_name_id
+       WHERE t.txn_type = ?
+         AND COALESCE(t.txn_balance_amount, 0) > 0
+       ORDER BY date(t.txn_date) DESC, t.txn_id DESC`
+    )
+    .all(orderType === 'purchase' ? 3 : 1);
+}
+
 function getDbInfo() {
   const db = getDb();
   const tables = db
@@ -4421,5 +4522,7 @@ module.exports = {
   deleteSnapshot,
   rollbackToSnapshot,
   updateParty,
+  recordPayment,
+  listOutstanding,
   updateItem
 };

@@ -120,6 +120,11 @@ ipcMain.handle('order:update', async (_event, orderId, payload) => {
   db.createSnapshot('Before: order:update', 'order:update', true);
   return db.updateOrder(Number(orderId), payload);
 });
+ipcMain.handle('order:outstanding', async (_event, orderType) => db.listOutstanding(orderType));
+ipcMain.handle('order:recordPayment', async (_event, orderId, amount) => {
+  db.createSnapshot('Before: recordPayment', 'order:recordPayment', true);
+  return db.recordPayment(Number(orderId), Number(amount));
+});
 ipcMain.handle('order:delete', async (_event, orderId) => {
   db.createSnapshot('Before: order:delete', 'order:delete', true);
   return db.deleteOrder(Number(orderId));
