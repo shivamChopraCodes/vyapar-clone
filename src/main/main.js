@@ -248,6 +248,20 @@ ipcMain.handle('gemini:getApiKey', async () => getGeminiApiKey());
 ipcMain.handle('gemini:setApiKey', async (_event, key = '') => setGeminiApiKey(key));
 ipcMain.handle('gemini:generate', async (_event, payload) => generateGeminiResponse(payload || {}));
 ipcMain.handle('debug:dbInfo', async () => db.getDbInfo());
+// --- Dev mode (sandbox database) ---
+ipcMain.handle('dbMode:get', async () => db.getMode());
+ipcMain.handle('dbMode:set', async (_event, mode) => {
+  const result = db.setMode(mode);
+  // Every page holds rows fetched from the previous database; that state must not survive
+  // the swap, so reload the renderer rather than trying to invalidate each screen.
+  BrowserWindow.getAllWindows().forEach((win) => win.webContents.reload());
+  return result;
+});
+ipcMain.handle('dbMode:resetDev', async () => {
+  const result = db.resetDevDb();
+  BrowserWindow.getAllWindows().forEach((win) => win.webContents.reload());
+  return result;
+});
 ipcMain.handle('debug:orders', async () => db.getOrdersDiagnostics());
 
 ipcMain.handle('import:vyaparDump', async (_event, dumpPath) =>

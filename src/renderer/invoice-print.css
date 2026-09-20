@@ -279,7 +279,8 @@
     display: block !important;
   }
 
-  .sidebar {
+  .sidebar,
+  .dev-banner {
     display: none !important;
   }
 

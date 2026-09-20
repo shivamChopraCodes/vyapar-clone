@@ -6,15 +6,124 @@ const { app } = require('electron');
 
 let db;
 let currentDbPath;
+let currentMode = null;
 
-function resolveDbPath() {
+const DB_MODE_FILE = 'db-mode.json';
+
+function getUserDataDir() {
+  return app && typeof app.getPath === 'function'
+    ? app.getPath('userData')
+    : path.join(os.homedir(), 'Library', 'Application Support', 'vyapar-clone');
+}
+
+function getModeFilePath() {
+  return path.join(getUserDataDir(), DB_MODE_FILE);
+}
+
+function getMode() {
+  if (currentMode) return currentMode;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(getModeFilePath(), 'utf8'));
+    currentMode = parsed && parsed.mode === 'dev' ? 'dev' : 'live';
+  } catch (_err) {
+    currentMode = 'live';
+  }
+  return currentMode;
+}
+
+function writeModeFile(mode) {
+  const dir = getUserDataDir();
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(getModeFilePath(), JSON.stringify({ mode }, null, 2), 'utf8');
+  currentMode = mode;
+}
+
+function getDevDir() {
+  return path.join(getUserDataDir(), 'dev');
+}
+
+function getDevDbPath() {
+  return path.join(getDevDir(), 'vyapar-dev.db');
+}
+
+// The real books, regardless of the active mode. VYAPAR_DB_PATH is set by `npm run dev` and
+// points at a live backup file, so it must only ever be consulted here.
+function resolveLiveDbPath() {
   if (process.env.VYAPAR_DB_PATH && fs.existsSync(process.env.VYAPAR_DB_PATH)) {
     return process.env.VYAPAR_DB_PATH;
   }
-  if (app && typeof app.getPath === 'function') {
-    return path.join(app.getPath('userData'), 'vyapar.db');
+  return path.join(getUserDataDir(), 'vyapar.db');
+}
+
+// Dev mode deliberately outranks VYAPAR_DB_PATH: otherwise the hardcoded path in the dev script
+// would keep every write landing on the real books while the UI claimed we were sandboxed.
+function resolveDbPath() {
+  return getMode() === 'dev' ? getDevDbPath() : resolveLiveDbPath();
+}
+
+function removeDbFiles(targetPath) {
+  [targetPath, `${targetPath}-wal`, `${targetPath}-shm`].forEach((file) => {
+    try {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    } catch (_err) {
+      /* ignore */
+    }
+  });
+}
+
+function closeDb() {
+  if (!db) return;
+  try {
+    db.close();
+  } catch (_err) {
+    /* ignore */
   }
-  return path.join(os.homedir(), 'Library', 'Application Support', 'vyapar-clone', 'vyapar.db');
+  db = null;
+}
+
+// Copies live -> dev using `VACUUM INTO`, the same WAL-safe mechanism createSnapshot relies on.
+// A plain fs.copyFileSync can silently miss committed data still sitting in the -wal file.
+function seedDevFromLive() {
+  const livePath = resolveLiveDbPath();
+  if (!fs.existsSync(livePath)) {
+    throw new Error(`Live database not found at ${livePath}.`);
+  }
+  const devDir = getDevDir();
+  if (!fs.existsSync(devDir)) fs.mkdirSync(devDir, { recursive: true });
+  const devPath = getDevDbPath();
+  removeDbFiles(devPath);
+
+  const reuseOpenHandle = db && currentDbPath === livePath;
+  const source = reuseOpenHandle ? db : new Database(livePath);
+  try {
+    source.exec('PRAGMA wal_checkpoint(FULL)');
+    source.exec(`VACUUM INTO '${devPath.replace(/'/g, "''")}'`);
+  } finally {
+    if (!reuseOpenHandle) source.close();
+  }
+  return devPath;
+}
+
+function setMode(nextMode) {
+  const mode = nextMode === 'dev' ? 'dev' : 'live';
+  if (mode === getMode() && db) {
+    return { mode, path: currentDbPath };
+  }
+  if (mode === 'dev' && !fs.existsSync(getDevDbPath())) {
+    seedDevFromLive();
+  }
+  closeDb();
+  writeModeFile(mode);
+  getDb();
+  return { mode, path: currentDbPath };
+}
+
+function resetDevDb() {
+  const wasDev = getMode() === 'dev';
+  if (wasDev) closeDb();
+  seedDevFromLive();
+  if (wasDev) getDb();
+  return { ok: true, path: getDevDbPath() };
 }
 
 function getDb() {
@@ -3926,7 +4035,16 @@ function getDbInfo() {
   const ordersCount = hasTransactions
     ? db.prepare('SELECT COUNT(*) as c FROM kb_transactions').get().c
     : 0;
-  return { path: currentDbPath, tablesCount: tables.length, hasTransactions, ordersCount };
+  return {
+    path: currentDbPath,
+    mode: getMode(),
+    livePath: resolveLiveDbPath(),
+    devPath: getDevDbPath(),
+    devSeeded: fs.existsSync(getDevDbPath()),
+    tablesCount: tables.length,
+    hasTransactions,
+    ordersCount
+  };
 }
 
 function getOrdersDiagnostics() {
@@ -3962,12 +4080,11 @@ function getOrdersDiagnostics() {
   return { total, byType, sample, withParties };
 }
 
+// Snapshots follow the active mode, so sandbox testing never pollutes the real snapshot list
+// and a rollback can only ever restore a database belonging to the mode you are in.
 function getSnapshotDir() {
-  const userDataDir =
-    app && typeof app.getPath === 'function'
-      ? app.getPath('userData')
-      : path.join(os.homedir(), 'Library', 'Application Support', 'vyapar-clone');
-  const dir = path.join(userDataDir, 'snapshots');
+  const base = getMode() === 'dev' ? getDevDir() : getUserDataDir();
+  const dir = path.join(base, 'snapshots');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -4170,6 +4287,9 @@ module.exports = {
   importFromVyaparDump,
   importFromVyaparSqlite,
   getDbInfo,
+  getMode,
+  setMode,
+  resetDevDb,
   getOrdersDiagnostics,
   createSnapshot,
   listSnapshots,

@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/Card'
 
 export default function Overview() {
   const [stats, setStats] = useState({ companies: 0, parties: 0, items: 0, orders: 0 });
-  const [userDataPath, setUserDataPath] = useState('');
+  const [dbInfo, setDbInfo] = useState(null);
   const [backupPath, setBackupPath] = useState('');
   const [backupStatus, setBackupStatus] = useState('');
   const [backuping, setBackuping] = useState(false);
@@ -27,7 +27,7 @@ export default function Overview() {
       });
     };
     load();
-    window.vyapar.getUserDataPath().then(setUserDataPath).catch(() => {});
+    window.vyapar.getDbInfo().then(setDbInfo).catch(() => {});
   }, []);
 
   const createBackup = async () => {
@@ -49,8 +49,13 @@ export default function Overview() {
       <div>
         <h2 className="section-title text-3xl font-semibold">Operations Overview</h2>
         <p className="text-muted">Track your company, parties, and order flow at a glance.</p>
-        {userDataPath ? (
-          <p className="mt-2 text-xs text-muted">DB path: {userDataPath}/vyapar.db</p>
+        {dbInfo ? (
+          <p className="mt-2 text-xs text-muted">
+            <span className={dbInfo.mode === 'dev' ? 'font-semibold text-amber-700' : 'font-semibold'}>
+              {dbInfo.mode === 'dev' ? '🧪 DEV' : '🔴 LIVE'}
+            </span>{' '}
+            · DB path: {dbInfo.path}
+          </p>
         ) : null}
       </div>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">

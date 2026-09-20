@@ -53,12 +53,18 @@ export default function Snapshots() {
   const [rollingBack, setRollingBack] = useState(null);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+  const [dbInfo, setDbInfo] = useState(null);
+  const [switchingMode, setSwitchingMode] = useState(false);
 
   const load = async () => {
     try {
       setLoading(true);
-      const data = await window.vyapar.listSnapshots();
+      const [data, info] = await Promise.all([
+        window.vyapar.listSnapshots(),
+        window.vyapar.getDbInfo()
+      ]);
       setSnapshots(data || []);
+      setDbInfo(info || null);
     } catch (err) {
       setError(err?.message || 'Failed to load snapshots.');
     } finally {
@@ -119,6 +125,44 @@ export default function Snapshots() {
     }
   };
 
+  const isDev = dbInfo?.mode === 'dev';
+
+  const handleSwitchMode = async () => {
+    const target = isDev ? 'live' : 'dev';
+    if (target === 'live') {
+      const confirmed = window.confirm(
+        'Switch to LIVE data?\n\nChanges from here on will affect your real books.\n\nThe page will reload.'
+      );
+      if (!confirmed) return;
+    }
+    setError('');
+    setSuccessMsg('');
+    try {
+      setSwitchingMode(true);
+      // Main reloads the window once the handle is swapped, so nothing after this runs.
+      await window.vyapar.setDbMode(target);
+    } catch (err) {
+      setError(err?.message || 'Failed to switch mode.');
+      setSwitchingMode(false);
+    }
+  };
+
+  const handleResetDev = async () => {
+    const confirmed = window.confirm(
+      'Reset the sandbox database?\n\nAll test data created in dev mode is discarded and a fresh copy is taken from your live books.\n\nThe page will reload.'
+    );
+    if (!confirmed) return;
+    setError('');
+    setSuccessMsg('');
+    try {
+      setSwitchingMode(true);
+      await window.vyapar.resetDevDb();
+    } catch (err) {
+      setError(err?.message || 'Failed to reset dev database.');
+      setSwitchingMode(false);
+    }
+  };
+
   const autoCount = snapshots.filter((s) => s.auto).length;
   const manualCount = snapshots.filter((s) => !s.auto).length;
 
@@ -137,6 +181,48 @@ export default function Snapshots() {
           </Button>
         </div>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>
+            {isDev ? '🧪 Dev Mode — sandbox database' : '🔴 Live Mode — real books'}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-sm text-muted">
+            {isDev
+              ? 'Every read and write goes to a sandbox copy. Your live books are untouched, and snapshots taken here are kept separate.'
+              : 'Every read and write goes to your real books. Switch to dev mode to try things out safely.'}
+          </p>
+          <div className="text-xs text-muted space-y-1">
+            <div>
+              <span className="font-medium">Active database:</span> {dbInfo?.path || '—'}
+            </div>
+            <div>
+              <span className="font-medium">Live database:</span> {dbInfo?.livePath || '—'}
+            </div>
+            <div>
+              <span className="font-medium">Orders in this database:</span>{' '}
+              {dbInfo?.ordersCount ?? '—'}
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <Button type="button" onClick={handleSwitchMode} disabled={switchingMode}>
+              {switchingMode ? 'Switching…' : isDev ? 'Switch to Live' : 'Switch to Dev Mode'}
+            </Button>
+            {isDev && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={handleResetDev}
+                disabled={switchingMode}
+              >
+                Reset sandbox from live
+              </Button>
+            )}
+          </div>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
