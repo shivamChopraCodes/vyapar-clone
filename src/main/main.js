@@ -184,7 +184,7 @@ ipcMain.handle('ocr:processImage', async (_event, imagePath, engine = 'tesseract
     { "item_name": "", "hsn": "", "qty": 0, "rate": 0, "amount": 0, "batch_no": "", "expiry_date": "YYYY-MM-DD", "mrp": 0, "gst_rate": 0, "pack": "", "discount_pct": 0 }
   ]
 }`;
-    const result = await generateGeminiResponse({ prompt, imagePath, model: 'gemini-2.5-flash' });
+    const result = await generateGeminiResponse({ prompt, imagePath, model: 'gemini-3.5-flash' });
     let rawText = result.text;
     rawText = rawText.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
     
