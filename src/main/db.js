@@ -1957,7 +1957,8 @@ function getOrder(orderId) {
               t.txn_ref_number_char as ref_number,
               t.txn_place_of_supply as place_of_supply,
               COALESCE(t.txn_balance_amount, 0) as balance_amount,
-              COALESCE(t.txn_round_off_amount, 0) as round_off_amount
+              COALESCE(t.txn_round_off_amount, 0) as round_off_amount,
+              COALESCE(t.txn_discount_amount, 0) as discount_amount
        FROM kb_transactions t
        WHERE t.txn_id = ?`
     )
@@ -1972,7 +1973,8 @@ function getOrder(orderId) {
     ref_number: row.ref_number || '',
     place_of_supply: row.place_of_supply || '',
     balance_amount: Number(row.balance_amount || 0),
-    round_off_amount: Number(row.round_off_amount || 0)
+    round_off_amount: Number(row.round_off_amount || 0),
+    discount_amount: Number(row.discount_amount || 0)
   };
 }
 
@@ -2005,7 +2007,7 @@ function listOrderItems(orderId) {
 function updateOrder(orderId, order) {
   const db = getDb();
   const txnType = order.order_type === 'purchase' ? 3 : 1;
-  const applyRoundOff = txnType === 1 && Boolean(order.apply_round_off);
+  const applyRoundOff = Boolean(order.apply_round_off);
 
   const updateOrderStmt = db.prepare(
     `UPDATE kb_transactions
@@ -2017,7 +2019,8 @@ function updateOrder(orderId, order) {
          txn_place_of_supply = @txn_place_of_supply,
          txn_cash_amount = @txn_cash_amount,
          txn_balance_amount = @txn_balance_amount,
-         txn_round_off_amount = @txn_round_off_amount
+         txn_round_off_amount = @txn_round_off_amount,
+         txn_discount_amount = @txn_discount_amount
      WHERE txn_id = @txn_id`
   );
   const deleteLines = db.prepare('DELETE FROM kb_lineitems WHERE lineitem_txn_id = ?');
@@ -2072,8 +2075,10 @@ function updateOrder(orderId, order) {
       const baseAmount = qty * rate;
       return sum + baseAmount * (1 + gstRate / 100);
     }, 0);
+    const rawDiscount = Number(payload.discount_amount || 0);
+    const discountAmount = Number.isFinite(rawDiscount) ? Math.min(Math.max(rawDiscount, 0), invoiceTotal) : 0;
     let roundOffAmount = 0;
-    let effectiveTotal = invoiceTotal;
+    let effectiveTotal = invoiceTotal - discountAmount;
     if (applyRoundOff) {
       const decimal = effectiveTotal - Math.floor(effectiveTotal);
       const rounded = decimal > 0.5 ? Math.ceil(effectiveTotal) : Math.floor(effectiveTotal);
@@ -2108,7 +2113,8 @@ function updateOrder(orderId, order) {
       txn_place_of_supply: placeOfSupply,
       txn_cash_amount: cashAmount,
       txn_balance_amount: clampedBalance,
-      txn_round_off_amount: roundOffAmount
+      txn_round_off_amount: roundOffAmount,
+      txn_discount_amount: discountAmount
     });
 
     if (existingOrder.txn_type === 3) {
@@ -3078,20 +3084,20 @@ function resolveTaxCodeIdByRate(db, rateValue, isInterState) {
 function createOrder(order) {
   const db = getDb();
   const txnType = order.order_type === 'purchase' ? 3 : 1;
-  const applyRoundOff = txnType === 1 && Boolean(order.apply_round_off);
+  const applyRoundOff = Boolean(order.apply_round_off);
 
   const insertOrder = db.prepare(
     `INSERT INTO kb_transactions (
         txn_type, txn_name_id, txn_date, txn_ref_number_char, txn_description,
         txn_place_of_supply,
         txn_status, txn_payment_status, txn_tax_inclusive, txn_time,
-        txn_cash_amount, txn_balance_amount, txn_round_off_amount
+        txn_cash_amount, txn_balance_amount, txn_round_off_amount, txn_discount_amount
      )
      VALUES (
         @txn_type, @txn_name_id, @txn_date, @txn_ref_number_char, @txn_description,
         @txn_place_of_supply,
         1, 1, 2, @txn_time,
-        @txn_cash_amount, @txn_balance_amount, @txn_round_off_amount
+        @txn_cash_amount, @txn_balance_amount, @txn_round_off_amount, @txn_discount_amount
      )`
   );
   const insertLine = db.prepare(
@@ -3134,8 +3140,10 @@ function createOrder(order) {
       const baseAmount = qty * rate;
       return sum + baseAmount * (1 + gstRate / 100);
     }, 0);
+    const rawDiscount = Number(payload.discount_amount || 0);
+    const discountAmount = Number.isFinite(rawDiscount) ? Math.min(Math.max(rawDiscount, 0), invoiceTotal) : 0;
     let roundOffAmount = 0;
-    let effectiveTotal = invoiceTotal;
+    let effectiveTotal = invoiceTotal - discountAmount;
     if (applyRoundOff) {
       const decimal = effectiveTotal - Math.floor(effectiveTotal);
       const rounded = decimal > 0.5 ? Math.ceil(effectiveTotal) : Math.floor(effectiveTotal);
@@ -3170,7 +3178,8 @@ function createOrder(order) {
       txn_time: 0,
       txn_cash_amount: cashAmount,
       txn_balance_amount: clampedBalance,
-      txn_round_off_amount: roundOffAmount
+      txn_round_off_amount: roundOffAmount,
+      txn_discount_amount: discountAmount
     });
     const orderId = info.lastInsertRowid;
 
@@ -3591,6 +3600,8 @@ function importPurchaseBillFromOcr(payload) {
       notes: String(rawBill?.notes || payload?.notes || '').trim(),
       place_of_supply: placeOfSupply,
       balance_amount: Number(rawBill?.balance_amount ?? payload?.balance_amount ?? 0),
+      discount_amount: Number(rawBill?.discount_amount ?? payload?.discount_amount ?? 0),
+      apply_round_off: Boolean(payload?.apply_round_off),
       items: normalizedItems
     };
     if (!orderPayload.order_date) {
@@ -3859,6 +3870,7 @@ function importSaleBillFromOcr(payload) {
       notes: String(rawBill?.notes || payload?.notes || '').trim(),
       place_of_supply: placeOfSupply,
       balance_amount: Number(rawBill?.balance_amount ?? payload?.balance_amount ?? 0),
+      discount_amount: Number(rawBill?.discount_amount ?? payload?.discount_amount ?? 0),
       apply_round_off: Boolean(payload?.apply_round_off),
       items: normalizedItems
     };

@@ -77,6 +77,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
   const [balanceAmount, setBalanceAmount] = useState('0');
   const [useWholeAmountAsBalance, setUseWholeAmountAsBalance] = useState(false);
   const [applyRoundOff, setApplyRoundOff] = useState(false);
+  const [discountAmount, setDiscountAmount] = useState('0');
   const [items, setItems] = useState([]);
   const [units, setUnits] = useState([]);
   const [parties, setParties] = useState([]);
@@ -130,6 +131,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
     setNotes(order.notes || '');
     setBalanceAmount(String(Number(order.balance_amount || 0)));
     setApplyRoundOff(Number(order.round_off_amount || 0) !== 0);
+    setDiscountAmount(String(Number(order.discount_amount || 0)));
     setOrderItems(
       (lines || []).map((line) => ({
         item_id: String(line.item_id),
@@ -379,6 +381,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
       notes,
       place_of_supply: placeOfSupply,
       balance_amount: Number.isFinite(Number(balanceAmount)) ? Number(balanceAmount) : 0,
+      discount_amount: Number.isFinite(Number(discountAmount)) ? Math.max(0, Number(discountAmount)) : 0,
       items: orderItems.map((line) => ({
         item_id: Number(line.item_id),
         unit_id:
@@ -421,14 +424,22 @@ export default function OrderEdit({ forcedOrderType = null }) {
     );
   }, [orderItems]);
 
-  const roundOffAmount = useMemo(() => {
-    if (!applyRoundOff || effectiveOrderType !== 'sale') return 0;
-    const decimal = totals.invoiceTotal - Math.floor(totals.invoiceTotal);
-    const rounded = decimal > 0.5 ? Math.ceil(totals.invoiceTotal) : Math.floor(totals.invoiceTotal);
-    return Number((rounded - totals.invoiceTotal).toFixed(2));
-  }, [applyRoundOff, effectiveOrderType, totals.invoiceTotal]);
+  const discountValue = useMemo(() => {
+    const raw = Number(discountAmount);
+    if (!Number.isFinite(raw) || raw <= 0) return 0;
+    return Math.min(raw, totals.invoiceTotal);
+  }, [discountAmount, totals.invoiceTotal]);
 
-  const displayedInvoiceTotal = totals.invoiceTotal + roundOffAmount;
+  const afterDiscountTotal = Math.max(0, totals.invoiceTotal - discountValue);
+
+  const roundOffAmount = useMemo(() => {
+    if (!applyRoundOff) return 0;
+    const decimal = afterDiscountTotal - Math.floor(afterDiscountTotal);
+    const rounded = decimal > 0.5 ? Math.ceil(afterDiscountTotal) : Math.floor(afterDiscountTotal);
+    return Number((rounded - afterDiscountTotal).toFixed(2));
+  }, [applyRoundOff, afterDiscountTotal]);
+
+  const displayedInvoiceTotal = afterDiscountTotal + roundOffAmount;
 
   useEffect(() => {
     if (useWholeAmountAsBalance) {
@@ -660,6 +671,16 @@ export default function OrderEdit({ forcedOrderType = null }) {
               <Input value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Optional notes" />
             </div>
             <div className="md:col-span-3">
+              <Label>Discount on Invoice</Label>
+              <Input
+                type="number"
+                value={discountAmount}
+                onChange={(event) => setDiscountAmount(event.target.value)}
+                placeholder="0.00"
+              />
+              <p className="mt-1 text-xs text-muted">Flat amount subtracted from the invoice total.</p>
+            </div>
+            <div className="md:col-span-3">
               <Label>Balance Amount</Label>
               <Input
                 value={balanceAmount}
@@ -676,7 +697,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
                   onChange={(event) => {
                     const checked = event.target.checked;
                     setUseWholeAmountAsBalance(checked);
-                    if (checked) setBalanceAmount(totals.invoiceTotal.toFixed(2));
+                    if (checked) setBalanceAmount(displayedInvoiceTotal.toFixed(2));
                   }}
                 />
                 Use whole invoice amount
@@ -905,7 +926,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
             </Table>
           </div>
 
-          <div className="mt-4 grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
+          <div className="mt-4 grid grid-cols-1 gap-3 text-sm md:grid-cols-4">
             <div className="rounded-lg border border-border bg-muted/20 px-4 py-3">
               <p className="text-muted">Items Total</p>
               <p className="text-base font-semibold">{totals.itemsTotal.toFixed(2)}</p>
@@ -915,9 +936,13 @@ export default function OrderEdit({ forcedOrderType = null }) {
               <p className="text-base font-semibold">{totals.gstTotal.toFixed(2)}</p>
             </div>
             <div className="rounded-lg border border-border bg-muted/20 px-4 py-3">
+              <p className="text-muted">Discount</p>
+              <p className="text-base font-semibold">- {discountValue.toFixed(2)}</p>
+            </div>
+            <div className="rounded-lg border border-border bg-muted/20 px-4 py-3">
               <p className="text-muted">Invoice Total</p>
               <p className="text-base font-semibold">{displayedInvoiceTotal.toFixed(2)}</p>
-              {applyRoundOff && effectiveOrderType === 'sale' && roundOffAmount !== 0 && (
+              {roundOffAmount !== 0 && (
                 <p className="text-xs text-muted">Round off: {roundOffAmount.toFixed(2)}</p>
               )}
             </div>
@@ -945,7 +970,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
         <InvoicePrint
           company={company}
           party={selectedParty}
-          order={{ id: orderId, invoice_no: invoiceNo, order_date: orderDate, place_of_supply: placeOfSupply }}
+          order={{ id: orderId, invoice_no: invoiceNo, order_date: orderDate, place_of_supply: placeOfSupply, discount_amount: discountValue }}
           orderItems={orderItems}
           totals={totals}
           itemMap={itemMap}

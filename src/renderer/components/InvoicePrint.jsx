@@ -85,8 +85,10 @@ export default function InvoicePrint({ company, party, order, orderItems, totals
   const totalGst = rows.reduce((sum, r) => sum + r.gstAmount, 0);
   const totalAmount = rows.reduce((sum, r) => sum + r.amount, 0);
 
-  const roundedTotal = Math.round(totals.invoiceTotal);
-  const roundOff = (roundedTotal - totals.invoiceTotal).toFixed(2);
+  const discountAmount = Math.max(0, Number(order?.discount_amount || 0));
+  const afterDiscount = Math.max(0, totals.invoiceTotal - discountAmount);
+  const roundedTotal = Math.round(afterDiscount);
+  const roundOff = (roundedTotal - afterDiscount).toFixed(2);
 
   return (
     <div className="invoice-print-wrapper">
@@ -225,6 +227,12 @@ export default function InvoicePrint({ company, party, order, orderItems, totals
                   <td>Sub Total</td>
                   <td>{formatCurrency(totals.invoiceTotal)}</td>
                 </tr>
+                {discountAmount > 0 && (
+                  <tr>
+                    <td>Discount</td>
+                    <td>- {formatCurrency(discountAmount)}</td>
+                  </tr>
+                )}
                 <tr>
                   <td>Round off</td>
                   <td>{formatCurrency(roundOff)}</td>

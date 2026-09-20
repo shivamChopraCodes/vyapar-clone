@@ -73,6 +73,7 @@ export default function OcrImport() {
   const [ocrResult, setOcrResult] = useState(null);
   const [matchResult, setMatchResult] = useState(null);
   const [applyRoundOff, setApplyRoundOff] = useState(false);
+  const [discountAmount, setDiscountAmount] = useState('0');
   const [parties, setParties] = useState([]);
   const [items, setItems] = useState([]);
   const [batchOptionsByItemId, setBatchOptionsByItemId] = useState({});
@@ -373,34 +374,23 @@ export default function OcrImport() {
       const finalPartyId = supplierDraft.create_new ? null : (Number.isNaN(parsedPartyId) ? null : parsedPartyId);
       
       const importType = ocrResult?.parsed?.type || defaultType || 'purchase';
+      const partyDraft = {
+        id: finalPartyId,
+        name: supplierDraft.name || '',
+        phone: supplierDraft.phone || '',
+        gst_number: supplierDraft.gst_number || '',
+        address: supplierDraft.address || '',
+        state_of_supply: supplierDraft.state_of_supply || ''
+      };
       const payload = {
         party_id: finalPartyId,
-      ...(importType === 'sale'
-        ? {
-            buyer: {
-              id: finalPartyId,
-              name: supplierDraft.name || '',
-              phone: supplierDraft.phone || '',
-              gst_number: supplierDraft.gst_number || '',
-              address: supplierDraft.address || '',
-              state_of_supply: supplierDraft.state_of_supply || ''
-            },
-            apply_round_off: Boolean(applyRoundOff)
-          }
-        : {
-            supplier: {
-              id: finalPartyId,
-              name: supplierDraft.name || '',
-              phone: supplierDraft.phone || '',
-              gst_number: supplierDraft.gst_number || '',
-              address: supplierDraft.address || '',
-              state_of_supply: supplierDraft.state_of_supply || ''
-            }
-          }),
+        apply_round_off: Boolean(applyRoundOff),
+        ...(importType === 'sale' ? { buyer: partyDraft } : { supplier: partyDraft }),
         bill: {
           invoice_no: billDraft.invoice_no || '',
           order_date: billDraft.order_date || '',
-          notes: `OCR import from ${fileName}`
+          notes: `OCR import from ${fileName}`,
+          discount_amount: Number.isFinite(Number(discountAmount)) ? Math.max(0, Number(discountAmount)) : 0
         },
         items: itemDrafts.map((row) => {
           const parsedItemId = row.selected_item_id ? Number(row.selected_item_id) : null;
@@ -466,6 +456,23 @@ export default function OcrImport() {
       { itemsTotal: 0, gstTotal: 0, grandTotal: 0 }
     );
   }, [itemDrafts]);
+
+  const discountValue = useMemo(() => {
+    const raw = Number(discountAmount);
+    if (!Number.isFinite(raw) || raw <= 0) return 0;
+    return Math.min(raw, totals.grandTotal);
+  }, [discountAmount, totals.grandTotal]);
+
+  const afterDiscountTotal = Math.max(0, totals.grandTotal - discountValue);
+
+  const roundOffValue = useMemo(() => {
+    if (!applyRoundOff) return 0;
+    const decimal = afterDiscountTotal - Math.floor(afterDiscountTotal);
+    const rounded = decimal > 0.5 ? Math.ceil(afterDiscountTotal) : Math.floor(afterDiscountTotal);
+    return Number((rounded - afterDiscountTotal).toFixed(2));
+  }, [applyRoundOff, afterDiscountTotal]);
+
+  const finalTotal = afterDiscountTotal + roundOffValue;
 
   return (
     <div className="space-y-4">
@@ -654,6 +661,23 @@ export default function OcrImport() {
                     onChange={(event) => setBillDraft((prev) => ({ ...prev, order_date: event.target.value }))}
                   />
                 </div>
+                <div>
+                  <Label>Discount on Invoice</Label>
+                  <Input
+                    type="number"
+                    value={discountAmount}
+                    onChange={(event) => setDiscountAmount(event.target.value)}
+                    placeholder="0.00"
+                  />
+                  <label className="mt-2 flex items-center gap-2 text-sm text-muted">
+                    <input
+                      type="checkbox"
+                      checked={applyRoundOff}
+                      onChange={(event) => setApplyRoundOff(event.target.checked)}
+                    />
+                    Round off final amount
+                  </label>
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -777,8 +801,15 @@ export default function OcrImport() {
                   <p className="font-semibold">{formatCurrency(totals.gstTotal)}</p>
                 </div>
                 <div className="ocr-summary-box">
+                  <p className="text-xs uppercase text-muted">Discount</p>
+                  <p className="font-semibold">- {formatCurrency(discountValue)}</p>
+                </div>
+                <div className="ocr-summary-box">
                   <p className="text-xs uppercase text-muted">Grand Total</p>
-                  <p className="font-semibold">{formatCurrency(totals.grandTotal)}</p>
+                  <p className="font-semibold">{formatCurrency(finalTotal)}</p>
+                  {roundOffValue !== 0 && (
+                    <p className="text-xs text-muted">Round off: {formatCurrency(roundOffValue)}</p>
+                  )}
                 </div>
               </div>
             </CardContent>
@@ -801,7 +832,17 @@ export default function OcrImport() {
             <CardTitle>Confirm Import</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            {(ocrResult?.parsed?.type || defaultType || 'purchase') === 'sale' && (
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="flex items-center gap-2 text-sm">
+                <span className="text-muted">Discount on Invoice</span>
+                <Input
+                  type="number"
+                  className="w-32"
+                  value={discountAmount}
+                  onChange={(event) => setDiscountAmount(event.target.value)}
+                  placeholder="0.00"
+                />
+              </label>
               <label className="flex items-center gap-2 text-sm text-muted">
                 <input
                   type="checkbox"
@@ -810,7 +851,7 @@ export default function OcrImport() {
                 />
                 Round off final amount
               </label>
-            )}
+            </div>
             <div className="ocr-summary-grid">
               <div className="ocr-summary-box">
                 <p className="text-xs uppercase text-muted">Supplier</p>
@@ -837,8 +878,15 @@ export default function OcrImport() {
                 <p className="font-semibold">{formatCurrency(totals.gstTotal)}</p>
               </div>
               <div className="ocr-summary-box">
+                <p className="text-xs uppercase text-muted">Discount</p>
+                <p className="font-semibold">- {formatCurrency(discountValue)}</p>
+              </div>
+              <div className="ocr-summary-box">
                 <p className="text-xs uppercase text-muted">Grand Total</p>
-                <p className="font-semibold">{formatCurrency(totals.grandTotal)}</p>
+                <p className="font-semibold">{formatCurrency(finalTotal)}</p>
+                {roundOffValue !== 0 && (
+                  <p className="text-xs text-muted">Round off: {formatCurrency(roundOffValue)}</p>
+                )}
               </div>
             </div>
 
