@@ -1,5 +1,6 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
+import DbModeSwitch from './DbModeSwitch';
 
 const links = [
   { to: '/', label: 'Overview' },
@@ -10,7 +11,9 @@ const links = [
   { to: '/ai/gemini', label: 'Gemini API' },
   { to: '/sales', label: 'Sales Orders' },
   { to: '/sales/bulk', label: 'Bulk Sales Orders' },
+  { to: '/sales/export', label: 'Export Invoices' },
   { to: '/purchase', label: 'Purchase Orders' },
+  { to: '/telegram', label: 'Telegram Bot' },
   { to: '/snapshots', label: 'Snapshots' }
 ];
 
@@ -21,6 +24,8 @@ export default function Sidebar() {
         <h1 className="section-title text-2xl font-semibold">Vyapar Desk</h1>
         <p className="text-sm text-muted">Local ERP for GST & batch tracking</p>
       </div>
+
+      <DbModeSwitch />
       <nav className="space-y-2">
         {links.map((link) => (
           <NavLink
