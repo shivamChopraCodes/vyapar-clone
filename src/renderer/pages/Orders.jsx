@@ -331,6 +331,13 @@ export default function Orders({ mode = 'sale' }) {
               Bulk Generate
             </Button>
           )}
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => navigate(isPurchaseMode ? '/purchase/export' : '/sales/export')}
+          >
+            Export PDFs
+          </Button>
           <Button type="button" onClick={() => navigate(createPath)}>
             {isPurchaseMode ? '+ Add Purchase' : '+ Add Sale'}
           </Button>

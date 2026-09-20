@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -289,12 +289,13 @@ ipcMain.handle('app:userDataPath', async () => app.getPath('userData'));
 ipcMain.handle('invoice:previewChrome', async (_event, payload) => {
   const markup = payload?.markup ? String(payload.markup) : '';
   const css = payload?.css ? String(payload.css) : '';
+  const rawFileName = String(payload?.file_name || '').trim();
   const rawInvoiceNo = String(payload?.invoice_no || '').trim();
   if (!markup.trim()) {
     throw new Error('Invoice preview markup is missing.');
   }
   const invoiceNo = rawInvoiceNo || 'NA';
-  const baseName = `GST INVOICE_${invoiceNo}`;
+  const baseName = rawFileName || `GST INVOICE_${invoiceNo}`;
   const safeName = baseName.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').replace(/\s+/g, ' ').trim();
 
   const previewCssOverride = `
@@ -334,4 +335,146 @@ ipcMain.handle('invoice:previewChrome', async (_event, payload) => {
 
   await shell.openPath(filePath);
   return { ok: true, filePath };
+});
+
+ipcMain.handle('dialog:chooseFolder', async () => {
+  const focused = BrowserWindow.getFocusedWindow();
+  const options = {
+    title: 'Select folder to export invoices',
+    properties: ['openDirectory', 'createDirectory']
+  };
+  const result = focused
+    ? await dialog.showOpenDialog(focused, options)
+    : await dialog.showOpenDialog(options);
+  if (result.canceled || !result.filePaths || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
+
+ipcMain.handle('invoice:exportPdfs', async (_event, payload) => {
+  const folder = String(payload?.folder || '').trim();
+  const css = payload?.css ? String(payload.css) : '';
+  const invoices = Array.isArray(payload?.invoices) ? payload.invoices : [];
+  if (!folder) throw new Error('No export folder selected.');
+  if (!invoices.length) throw new Error('No invoices selected for export.');
+  if (!fs.existsSync(folder)) throw new Error('Export folder does not exist.');
+
+  // The PDF page is full-bleed A4 (printToPDF marginType 'none' below). We create a uniform ~12mm
+  // margin with body padding (deterministic, unlike page-margin APIs) and let the invoice fill that
+  // inner box. Dropping the 277mm min-height floor means the invoice is exactly as tall as its
+  // content; scale-to-fit (below) shrinks it if it would still spill past one page.
+  const PAGE_MARGIN_MM = 12;
+  // The invoice fills the inner box (page minus margins) as a flex column, and the items table
+  // grows to take the leftover height — so the ruled table stretches to fill the page and the
+  // totals/signature sit near the bottom, instead of the invoice floating with a blank lower band.
+  // A few mm of slack keeps a normal invoice just under one page so scale-to-fit stays at 1.0.
+  const printCssOverride = `
+    @page { size: A4; margin: 0; }
+    html, body { background: #fff; margin: 0; }
+    body { padding: ${PAGE_MARGIN_MM}mm; box-sizing: border-box; }
+    /* The app's @media print rules position the wrapper absolutely at the page edge, which would
+       bypass the body padding and remove side margins. Force it back into normal flow. */
+    .invoice-print-wrapper {
+      display: block !important;
+      position: static !important;
+      left: auto !important;
+      top: auto !important;
+      right: auto !important;
+      width: auto !important;
+    }
+    .invoice-print {
+      width: auto !important;
+      margin: 0 auto !important;
+      min-height: calc(297mm - ${2 * PAGE_MARGIN_MM + 3}mm) !important;
+      box-shadow: none !important;
+      display: flex !important;
+      flex-direction: column !important;
+    }
+    .inv-table { flex: 1 1 auto !important; }
+  `;
+
+  const sanitize = (name) =>
+    String(name || 'invoice')
+      .replace(/[<>:"/\\|?*]/g, '_')
+      .replace(/\s+/g, ' ')
+      .trim() || 'invoice';
+
+  const saved = [];
+  const failed = [];
+  const usedNames = new Set();
+
+  for (const inv of invoices) {
+    const markup = inv?.markup ? String(inv.markup) : '';
+    const base = sanitize(inv?.filename);
+    let fileName = `${base}.pdf`;
+    let counter = 1;
+    while (usedNames.has(fileName.toLowerCase())) {
+      fileName = `${base} (${counter}).pdf`;
+      counter += 1;
+    }
+    usedNames.add(fileName.toLowerCase());
+
+    if (!markup.trim()) {
+      failed.push({ filename: fileName, error: 'Empty invoice content.' });
+      continue;
+    }
+
+    const html = `<!doctype html><html><head><meta charset="utf-8" /><style>${css}\n${printCssOverride}</style></head><body>${markup}</body></html>`;
+    const tmpFile = path.join(
+      os.tmpdir(),
+      `invoice_export_${Date.now()}_${Math.random().toString(36).slice(2)}.html`
+    );
+    let win = null;
+    try {
+      fs.writeFileSync(tmpFile, html, 'utf8');
+      win = new BrowserWindow({
+        show: false,
+        width: 800,
+        height: 1200,
+        webPreferences: { offscreen: false, sandbox: true }
+      });
+      await win.loadFile(tmpFile);
+
+      // Scale-to-fit: measure the rendered invoice and shrink slightly if it would spill past
+      // one A4 page, so an invoice that overflows by a few lines still exports as a single page.
+      const A4_PAGE_PX = 1122.52; // 297mm at 96dpi
+      let scale = 1;
+      try {
+        const totalPx = await win.webContents.executeJavaScript(
+          'Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)'
+        );
+        if (Number.isFinite(totalPx) && totalPx > A4_PAGE_PX) {
+          scale = Math.max(0.5, (A4_PAGE_PX / totalPx) * 0.98);
+        }
+      } catch (_) {
+        /* fall back to scale 1 */
+      }
+
+      const pdf = await win.webContents.printToPDF({
+        printBackground: true,
+        pageSize: 'A4',
+        preferCSSPageSize: true,
+        scale,
+        margins: { marginType: 'none' }
+      });
+      fs.writeFileSync(path.join(folder, fileName), pdf);
+      saved.push({ filename: fileName });
+    } catch (error) {
+      failed.push({ filename: fileName, error: error?.message || 'Failed to export.' });
+    } finally {
+      if (win) {
+        try {
+          win.destroy();
+        } catch (_) {
+          /* noop */
+        }
+      }
+      try {
+        fs.unlinkSync(tmpFile);
+      } catch (_) {
+        /* noop */
+      }
+    }
+  }
+
+  return { ok: failed.length === 0, folder, total: invoices.length, saved, failed };
 });

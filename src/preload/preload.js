@@ -57,6 +57,8 @@ contextBridge.exposeInMainWorld('vyapar', {
   getUserDataPath: () => ipcRenderer.invoke('app:userDataPath'),
   importVyaparDump: (dumpPath) => ipcRenderer.invoke('import:vyaparDump', dumpPath),
   previewInvoiceInChrome: (payload) => ipcRenderer.invoke('invoice:previewChrome', payload),
+  chooseExportFolder: () => ipcRenderer.invoke('dialog:chooseFolder'),
+  exportInvoicesPdf: (payload) => ipcRenderer.invoke('invoice:exportPdfs', payload),
 
   createSnapshot: (label) => ipcRenderer.invoke('snapshot:create', label),
   listSnapshots: () => ipcRenderer.invoke('snapshot:list'),

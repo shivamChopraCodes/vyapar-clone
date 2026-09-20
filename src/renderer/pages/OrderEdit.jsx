@@ -584,15 +584,36 @@ export default function OrderEdit({ forcedOrderType = null }) {
     [parties, partyId]
   );
 
+  const buildInvoiceFileName = () => {
+    const partyName = String(selectedParty?.name || '').trim();
+    const firstWord = partyName ? partyName.split(/\s+/)[0] : String(invoiceNo || orderId || '');
+    const parts = [firstWord, orderDate].filter(Boolean);
+    const base = parts.length ? parts.join(' ') : 'Invoice';
+    return base
+      .replace(/[<>:"/\\|?*]/g, '_')
+      .replace(/\s+/g, ' ')
+      .trim();
+  };
+
+  const handlePrintInvoice = () => {
+    const previousTitle = document.title;
+    document.title = buildInvoiceFileName();
+    const restoreTitle = () => {
+      document.title = previousTitle;
+      window.removeEventListener('afterprint', restoreTitle);
+    };
+    window.addEventListener('afterprint', restoreTitle);
+    window.print();
+  };
+
   const previewInChrome = async () => {
     const markup = document.querySelector('.invoice-print-wrapper')?.outerHTML || '';
     if (!markup) return;
-    const invoiceNoForFile = String(invoiceNo || orderId || 'NA').trim();
     try {
       await window.vyapar.previewInvoiceInChrome({
         markup,
         css: invoicePrintCss,
-        invoice_no: invoiceNoForFile
+        file_name: buildInvoiceFileName()
       });
     } catch (error) {
       window.alert(error?.message || 'Could not open preview in Chrome.');
@@ -971,7 +992,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
               {isEditMode ? 'Save Changes' : 'Save Order'}
             </Button>
             {isEditMode && (
-              <Button type="button" variant="outline" onClick={() => window.print()}>
+              <Button type="button" variant="outline" onClick={handlePrintInvoice}>
                 🖨 Print Invoice
               </Button>
             )}
