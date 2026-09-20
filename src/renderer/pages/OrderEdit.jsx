@@ -62,6 +62,14 @@ const toExpiryMonthInputValue = (value) => {
   return `${match[2]}-${match[1]}`;
 };
 
+// Canonicalize only fully-recognized expiry input (MM/YYYY or YYYY-MM); otherwise keep as typed.
+const canonicalizeExpiryInput = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (/^\d{4}-\d{2}/.test(raw) || /^\d{1,2}\/\d{4}$/.test(raw)) return toExpiryMonthValue(raw);
+  return raw;
+};
+
 export default function OrderEdit({ forcedOrderType = null }) {
   const navigate = useNavigate();
   const { orderId } = useParams();
@@ -277,7 +285,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
       return;
     }
     if (field === 'expiry_date') {
-      setLineForm((prev) => ({ ...prev, expiry_date: toExpiryMonthValue(value) }));
+      setLineForm((prev) => ({ ...prev, expiry_date: value }));
       return;
     }
     setLineForm((prev) => ({ ...prev, [field]: value }));
@@ -353,7 +361,7 @@ export default function OrderEdit({ forcedOrderType = null }) {
         }
       }
       if (field === 'expiry_date') {
-        line.expiry_date = toExpiryMonthValue(value);
+        line.expiry_date = value;
       }
       if (field === 'unit_id') {
         line.unit_id = value ? Number(value) : null;
@@ -762,9 +770,14 @@ export default function OrderEdit({ forcedOrderType = null }) {
             <div>
               <Label>Expiry</Label>
               <Input
-                type="month"
-                value={toExpiryMonthInputValue(lineForm.expiry_date)}
+                type="text"
+                inputMode="numeric"
+                placeholder="MM/YYYY"
+                value={lineForm.expiry_date || ''}
                 onChange={updateLineForm('expiry_date')}
+                onBlur={() =>
+                  setLineForm((prev) => ({ ...prev, expiry_date: canonicalizeExpiryInput(prev.expiry_date) }))
+                }
               />
             </div>
             <div>
@@ -882,9 +895,14 @@ export default function OrderEdit({ forcedOrderType = null }) {
                       </TD>
                       <TD>
                         <Input
-                          type="month"
-                          value={toExpiryMonthInputValue(line.expiry_date || '')}
+                          type="text"
+                          inputMode="numeric"
+                          placeholder="MM/YYYY"
+                          value={line.expiry_date || ''}
                           onChange={updateExistingLine(index, 'expiry_date')}
+                          onBlur={() =>
+                            updateExistingLine(index, 'expiry_date')(canonicalizeExpiryInput(line.expiry_date || ''))
+                          }
                         />
                       </TD>
                       <TD>

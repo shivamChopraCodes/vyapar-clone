@@ -46,6 +46,14 @@ const toExpiryMonthValue = (value) => {
   return `${mm}/${yyyy}`;
 };
 
+// Canonicalize only fully-recognized expiry input (MM/YYYY or YYYY-MM); otherwise keep as typed.
+const canonicalizeExpiryInput = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (/^\d{4}-\d{2}/.test(raw) || /^\d{1,2}\/\d{4}$/.test(raw)) return toExpiryMonthValue(raw);
+  return raw;
+};
+
 const confidenceClass = (value) => {
   if (value >= 0.85) return 'ocr-badge ocr-badge-green';
   if (value >= 0.5) return 'ocr-badge ocr-badge-yellow';
@@ -272,9 +280,6 @@ export default function OcrImport() {
             next.expiry_date = toExpiryMonthValue(matched.expiry_date || '');
             if (matched.mrp !== undefined && matched.mrp !== null) next.mrp = matched.mrp;
           }
-        }
-        if (field === 'expiry_date') {
-          next.expiry_date = toExpiryMonthValue(value);
         }
         return next;
       })
@@ -758,6 +763,8 @@ export default function OcrImport() {
                         <Input
                           value={row.expiry_date}
                           onChange={(event) => updateItemDraft(index, 'expiry_date', event.target.value)}
+                          onBlur={() => updateItemDraft(index, 'expiry_date', canonicalizeExpiryInput(row.expiry_date || ''))}
+                          inputMode="numeric"
                           placeholder="MM/YYYY"
                         />
                       </TD>
